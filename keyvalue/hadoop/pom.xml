@@ -33,7 +33,33 @@
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-client</artifactId>
       <version>${hadoop.version}</version>
+	  
+	    <exclusions>
+                <exclusion>
+					<groupId>org.glassfish.grizzly</groupId>
+					<artifactId>grizzly-framework</artifactId>
+                </exclusion>
+				
+				<exclusion>
+					<groupId>org.apache.hadoop</groupId>
+			       <artifactId>hadoop-mapreduce-client-core</artifactId>
+                </exclusion>
+				
+            </exclusions>
+			
     </dependency>
+	
+	     <dependency>
+			<groupId>org.apache.hadoop</groupId>
+			<artifactId>hadoop-mapreduce-client-core</artifactId>
+			<version>${hadoop.version}</version>
+		</dependency>  
+		
+		<dependency>
+			<groupId>org.apache.hadoop</groupId>
+			<artifactId>hadoop-mapreduce-client-common</artifactId>
+			<version>${hadoop.version}</version>
+		</dependency>
 
     <!-- Internal dependencies -->
     <dependency>

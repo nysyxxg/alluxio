@@ -168,8 +168,8 @@
     <module>assembly</module>
     <module>core</module>
     <module>examples</module>
-    <module>integration</module>
-    <module>keyvalue</module>
+     <module>integration</module> 
+    <module>keyvalue</module> 
     <module>logserver</module>
     <module>minicluster</module>
     <module>job</module>
@@ -179,7 +179,19 @@
   </modules>
 
   <dependencyManagement>
+		
     <dependencies>
+    
+       <dependency>
+			<groupId>jdk.tools</groupId>
+			<artifactId>jdk.tools</artifactId>
+			<version>1.8</version>
+			<scope>system</scope>
+			<systemPath>C:/Program Files/Java/jdk1.8.0_181/lib/tools.jar</systemPath>
+<!--  			<systemPath>C:/Program Files/Java/jdk1.7.0_80/lib/tools.jar</systemPath> -->
+			<!--<systemPath>${JAVA_HOME}/lib/tools.jar</systemPath>-->
+		</dependency>
+		
       <!-- Compile scope -->
       <dependency>
         <groupId>com.aliyun.oss</groupId>
@@ -823,11 +835,14 @@
           <artifactId>copy-rename-maven-plugin</artifactId>
           <version>1.0</version>
         </plugin>
+		<!--
         <plugin>
           <groupId>com.igormaznitsa</groupId>
           <artifactId>jcp</artifactId>
           <version>6.1.2</version>
         </plugin>
+		-->
+		
         <plugin>
           <groupId>com.mycila</groupId>
           <artifactId>license-maven-plugin</artifactId>
@@ -1132,7 +1147,7 @@
         <groupId>com.mycila</groupId>
         <artifactId>license-maven-plugin</artifactId>
         <configuration>
-          <header>${build.path}/license/HEADER.txt</header>
+          <!--  <header>${build.path}/license/HEADER.txt</header> -->
           <failIfMissing>true</failIfMissing>
           <aggregate>false</aggregate>
           <excludes>
@@ -1202,7 +1217,7 @@
         <artifactId>exec-maven-plugin</artifactId>
         <groupId>org.codehaus.mojo</groupId>
         <inherited>false</inherited>
-        <executions>
+      <!--  <executions>
           <execution>
             <id>Check that there are no Windows line endings</id>
             <phase>compile</phase>
@@ -1210,10 +1225,11 @@
               <goal>exec</goal>
             </goals>
             <configuration>
-              <executable>${build.path}/style/check_no_windows_line_endings.sh</executable>
+                <executable>${build.path}/style/check_no_windows_line_endings.sh</executable> 
             </configuration>
           </execution>
         </executions>
+		-->
       </plugin>
     </plugins>
   </build>

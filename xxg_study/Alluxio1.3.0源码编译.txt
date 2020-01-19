@@ -1,0 +1,57 @@
+Alluxio1.3.0源码编译
+
+最近研究有关Alluxio的有关信息，首先我们从Alluxio的源代码出手，
+直接利用工具去编译源码，这样以后可以更好的二次开发。
+
+1.环境
+Hadoop 2.6.0
+Spark 1.6.0
+Java 1.7
+RHEL6.4
+Maven工具 3.3.9
+
+2.下载：
+wget https://github.com/Alluxio/alluxio/archive/v1.3.0.tar.gz  
+
+3.编译：
+mvn clean package -Djava.version=1.7  -Dhadoop.version=2.6.0 -Dspark.version=1.6.0 -DskipTests  
+
+mvn clean package -DskipTests  
+
+编译问题：
+[INFO] -------------------------------------------------------------
+[ERROR] COMPILATION ERROR :
+[INFO] -------------------------------------------------------------
+[ERROR] 读取D:\SoftWare\eclipse-plugs\Repository\org\glassfish\grizzly\grizzly-framework\2.1.2\grizzly-framework-2.1.2.jar时出错; invalid CEN header (bad signature)
+[ERROR] 读取D:\SoftWare\eclipse-plugs\Repository\org\apache\hadoop\hadoop-mapreduce-client-core\2.2.0\hadoop-mapreduce-client-core-2.2.0.jar时出错; invalid CEN header (bad signature)
+[ERROR] 读取D:\SoftWare\eclipse-plugs\Repository\org\glassfish\grizzly\grizzly-framework\2.1.2\grizzly-framework-2.1.2.jar时出错; cannot read zip file entry
+[ERROR] 读取D:\SoftWare\eclipse-plugs\Repository\org\apache\hadoop\hadoop-mapreduce-client-core\2.2.0\hadoop-mapreduce-client-core-2.2.0.jar时出错; cannot read zip file entry
+[ERROR] /E:/Alluxio_SRC/alluxio/keyvalue/hadoop/src/main/java/alluxio/hadoop/mapreduce/KeyValueInputSplit.java:[21,35] 找不到符号
+  符号:   类 InputSplit
+  
+解决方法：
+1: 删除maven仓库中存在的jar
+2：排除不需要的jar
+在pom中添加：  
+   <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client</artifactId>
+      <version>${hadoop.version}</version>
+	  
+	    <exclusions>
+                <exclusion>
+					<groupId>org.glassfish.grizzly</groupId>
+					<artifactId>grizzly-framework</artifactId>
+                </exclusion>
+				
+				<exclusion>
+					<groupId>org.apache.hadoop</groupId>
+			       <artifactId>hadoop-mapreduce-client-core</artifactId>
+                </exclusion>
+				
+        </exclusions>
+			
+    </dependency>
+	
+	
+  

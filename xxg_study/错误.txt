@@ -1,0 +1,13 @@
+[INFO] Final Memory: 41M/247M
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.codehaus.mojo:exec-maven-plugin:1.4.0:exec 
+(Check that there are no Windows line endings) 
+on project alluxio-parent: Command execution failed. 
+Cannot run program "E:\Alluxio_SRC\alluxio\build\style\check_no_windows_line_endings.sh" 
+(in directory "E:\Alluxio_SRC\alluxio"): CreateProcess error=193, %1 不是有效的 Win32 应用程序。 -> [Help 1]
+[ERROR]
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR]
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoExecutionException
