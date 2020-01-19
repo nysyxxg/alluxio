@@ -13,12 +13,7 @@
 # Starts the Alluxio master on this node.
 # Starts an Alluxio worker on each node specified in conf/workers
 
-LAUNCHER=
-# If debugging is enabled propagate that through to sub-shells
-if [[ "$-" == *x* ]]; then
-  LAUNCHER="bash -x"
-fi
-BIN=$(cd "$( dirname "$( readlink "$0" || echo "$0" )" )"; pwd)
+. $(dirname "$0")/alluxio-common.sh
 
 USAGE="Usage: alluxio-mount.sh [Mount|SudoMount|Umount|SudoUmount] [MACHINE]
 \nIf omitted, MACHINE is default to be 'local'. MACHINE is one of:\n
@@ -30,7 +25,7 @@ function init_env() {
   . ${libexec_dir}/alluxio-config.sh
   MEM_SIZE=$(${BIN}/alluxio getConf --unit B alluxio.worker.memory.size)
   TIER_ALIAS=$(${BIN}/alluxio getConf alluxio.worker.tieredstore.level0.alias)
-  TIER_PATH=$(${BIN}/alluxio getConf alluxio.worker.tieredstore.level0.dirs.path)
+  get_ramdisk_array
 }
 
 function check_space_linux() {
@@ -43,6 +38,7 @@ function check_space_linux() {
 }
 
 function mount_ramfs_linux() {
+  TIER_PATH=${1}
   echo "Formatting RamFS: ${TIER_PATH} (${MEM_SIZE})"
   if [[ ${USE_SUDO} == true ]]; then
     sudo mkdir -p ${TIER_PATH}
@@ -76,7 +72,8 @@ function mount_ramfs_linux() {
 }
 
 function umount_ramfs_linux() {
-  if mount | grep ${TIER_PATH} > /dev/null; then
+  TIER_PATH=${1}
+  if mount | grep -E "(^|[[:space:]])${TIER_PATH}($|[[:space:]])" > /dev/null; then
     echo "Unmounting ${TIER_PATH}"
     if [[ ${USE_SUDO} == true ]]; then
       sudo umount -l -f ${TIER_PATH}
@@ -91,6 +88,7 @@ function umount_ramfs_linux() {
 }
 
 function mount_ramfs_mac() {
+  TIER_PATH=${1}
   # Convert the memory size to number of sectors. Each sector is 512 Byte.
   local num_sectors=$(${BIN}/alluxio runClass alluxio.util.HFSUtils ${MEM_SIZE} 512)
 
@@ -101,7 +99,8 @@ function mount_ramfs_mac() {
 }
 
 function umount_ramfs_mac() {
-  local device=$(df -l | grep ${TIER_PATH} | cut -d " " -f 1)
+  TIER_PATH=${1}
+  local device=$(df -l | grep -E "(^|[[:space:]])${TIER_PATH}($|[[:space:]])" | cut -d " " -f 1)
   if [[ -n "${device}" ]]; then
     echo "Unmounting ramfs at ${TIER_PATH}"
     hdiutil detach -force ${device}
@@ -110,24 +109,38 @@ function umount_ramfs_mac() {
   fi
 }
 
+function mount_ramfs_local_all() {
+  for RAMDISKPATH in "${RAMDISKARRAY[@]}"
+  do
+    mount_ramfs_local $RAMDISKPATH
+  done
+}
+
 function mount_ramfs_local() {
   if [[ $(uname -a) == Darwin* ]]; then
     # Assuming Mac OS X
-    umount_ramfs_mac
-    mount_ramfs_mac
+    umount_ramfs_mac $1
+    mount_ramfs_mac $1
   else
     # Assuming Linux
     check_space_linux
-    umount_ramfs_linux
-    mount_ramfs_linux
+    umount_ramfs_linux $1
+    mount_ramfs_linux $1
   fi
+}
+
+function umount_ramfs_local_all() {
+  for RAMDISKPATH in "${RAMDISKARRAY[@]}"
+  do 
+    umount_ramfs_local $RAMDISKPATH
+  done
 }
 
 function umount_ramfs_local() {
   if [[ $(uname -a) == Darwin* ]]; then
-    umount_ramfs_mac
+    umount_ramfs_mac $1
   else
-    umount_ramfs_linux
+    umount_ramfs_linux $1
   fi
 }
 
@@ -143,19 +156,19 @@ function run_local() {
   case "$mount_type" in
     Mount)
       USE_SUDO=false
-      mount_ramfs_local
+      mount_ramfs_local_all
       ;;
     SudoMount)
       USE_SUDO=true
-      mount_ramfs_local
+      mount_ramfs_local_all
       ;;
     Umount)
       USE_SUDO=false
-      umount_ramfs_local
+      umount_ramfs_local_all
       ;;
     SudoUmount)
       USE_SUDO=true
-      umount_ramfs_local
+      umount_ramfs_local_all
       ;;
     *)
       echo -e ${USAGE} >&2

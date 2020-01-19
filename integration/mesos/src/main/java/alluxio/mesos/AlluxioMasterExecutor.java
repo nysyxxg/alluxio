@@ -12,10 +12,12 @@
 package alluxio.mesos;
 
 import alluxio.cli.Format;
+import alluxio.conf.ServerConfiguration;
 import alluxio.master.AlluxioMaster;
 import alluxio.master.journal.JournalSystem;
 import alluxio.master.journal.JournalUtils;
 import alluxio.underfs.UnderFileSystemFactoryRegistry;
+import alluxio.util.CommonUtils.ProcessType;
 
 import org.apache.mesos.Executor;
 import org.apache.mesos.ExecutorDriver;
@@ -29,8 +31,11 @@ import javax.annotation.concurrent.ThreadSafe;
 /**
  * {@link AlluxioMasterExecutor} is an implementation of a Mesos executor responsible for
  * starting the Alluxio master.
+ *
+ * @deprecated since version 2.0
  */
 @ThreadSafe
+@Deprecated
 public class AlluxioMasterExecutor implements Executor {
   private static final Logger LOG = LoggerFactory.getLogger(AlluxioMasterExecutor.class);
 
@@ -76,10 +81,10 @@ public class AlluxioMasterExecutor implements Executor {
           Thread.currentThread().setContextClassLoader(
               UnderFileSystemFactoryRegistry.class.getClassLoader());
 
-          JournalSystem journalSystem =
-              new JournalSystem.Builder().setLocation(JournalUtils.getJournalLocation()).build();
+          JournalSystem journalSystem = new JournalSystem.Builder()
+              .setLocation(JournalUtils.getJournalLocation()).build(ProcessType.MASTER);
           if (!journalSystem.isFormatted()) {
-            Format.format(Format.Mode.MASTER);
+            Format.format(Format.Mode.MASTER, ServerConfiguration.global());
           }
           AlluxioMaster.main(new String[] {});
 

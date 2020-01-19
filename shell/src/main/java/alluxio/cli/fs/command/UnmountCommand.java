@@ -12,8 +12,9 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
 
@@ -27,13 +28,14 @@ import javax.annotation.concurrent.ThreadSafe;
  * Unmounts an Alluxio path.
  */
 @ThreadSafe
+@PublicApi
 public final class UnmountCommand extends AbstractFileSystemCommand {
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public UnmountCommand(FileSystem fs) {
-    super(fs);
+  public UnmountCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override

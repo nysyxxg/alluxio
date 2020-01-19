@@ -13,7 +13,8 @@ package alluxio.underfs.cos;
 
 import alluxio.AlluxioURI;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
+import alluxio.retry.RetryPolicy;
 import alluxio.underfs.ObjectUnderFileSystem;
 import alluxio.underfs.UnderFileSystem;
 import alluxio.underfs.UnderFileSystemConfiguration;
@@ -134,7 +135,7 @@ public class COSUnderFileSystem extends ObjectUnderFileSystem {
   }
 
   @Override
-  protected boolean createEmptyObject(String key) {
+  public boolean createEmptyObject(String key) {
     try {
       ObjectMetadata objMeta = new ObjectMetadata();
       objMeta.setContentLength(0);
@@ -148,7 +149,8 @@ public class COSUnderFileSystem extends ObjectUnderFileSystem {
 
   @Override
   protected OutputStream createObject(String key) throws IOException {
-    return new COSOutputStream(mBucketNameInternal, key, mClient);
+    return new COSOutputStream(mBucketNameInternal, key, mClient,
+        mUfsConf.getList(PropertyKey.TMP_DIRS, ","));
   }
 
   @Override
@@ -177,7 +179,7 @@ public class COSUnderFileSystem extends ObjectUnderFileSystem {
     ListObjectsRequest request = new ListObjectsRequest();
     request.setBucketName(mBucketNameInternal);
     request.setPrefix(key);
-    request.setMaxKeys(getListingChunkLength());
+    request.setMaxKeys(getListingChunkLength(mUfsConf));
     request.setDelimiter(delimiter);
 
     ObjectListing result = getObjectListingChunk(request);
@@ -233,6 +235,7 @@ public class COSUnderFileSystem extends ObjectUnderFileSystem {
     @Override
     public ObjectListingChunk getNextChunk() throws IOException {
       if (mResult.isTruncated()) {
+        mRequest.setMarker(mResult.getNextMarker());
         ObjectListing nextResult = mClient.listObjects(mRequest);
         if (nextResult != null) {
           return new COSObjectListingChunk(mRequest, nextResult);
@@ -296,9 +299,11 @@ public class COSUnderFileSystem extends ObjectUnderFileSystem {
   }
 
   @Override
-  protected InputStream openObject(String key, OpenOptions options) throws IOException {
+  protected InputStream openObject(String key, OpenOptions options,
+      RetryPolicy retryPolicy) throws IOException {
     try {
-      return new COSInputStream(mBucketNameInternal, key, mClient, options.getOffset());
+      return new COSInputStream(mBucketNameInternal, key, mClient, options.getOffset(), retryPolicy,
+          mUfsConf.getBytes(PropertyKey.UNDERFS_OBJECT_STORE_MULTI_RANGE_CHUNK_SIZE));
     } catch (CosClientException e) {
       throw new IOException(e.getMessage());
     }

@@ -11,9 +11,10 @@
 
 package alluxio.cli.validation;
 
-import alluxio.Configuration;
-import alluxio.PropertyKey;
-import alluxio.wire.Scope;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.grpc.Scope;
+import alluxio.grpc.GrpcUtils;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
@@ -26,6 +27,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+
+import javax.annotation.Nullable;
 
 /**
  * Task for validating system limit for current user.
@@ -68,10 +71,10 @@ public final class ClusterConfConsistencyValidationTask extends AbstractValidati
       }
       Scope scope = propertyKey.getScope();
       Set<String> targetNodes = ImmutableSet.of();
-      if (scope.contains(Scope.MASTER)) {
+      if (GrpcUtils.contains(scope, Scope.MASTER)) {
         targetNodes = masters;
       }
-      if (scope.contains(Scope.WORKER)) {
+      if (GrpcUtils.contains(scope, Scope.WORKER)) {
         targetNodes = Sets.union(targetNodes, workers);
       }
       if (targetNodes.size() < 2) {
@@ -122,9 +125,10 @@ public final class ClusterConfConsistencyValidationTask extends AbstractValidati
     return result;
   }
 
+  @Nullable
   private Properties getNodeConf(String node) {
     try {
-      String homeDir = Configuration.get(PropertyKey.HOME);
+      String homeDir = ServerConfiguration.get(PropertyKey.HOME);
       String remoteCommand = String.format(
           "%s/bin/alluxio getConf", homeDir);
       String localCommand = String.format(

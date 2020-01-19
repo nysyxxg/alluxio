@@ -11,14 +11,16 @@
 
 package alluxio.worker;
 
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.RestUtils;
 import alluxio.RuntimeConstants;
 import alluxio.web.JobWorkerWebServer;
 import alluxio.wire.AlluxioJobWorkerInfo;
 
-import com.qmino.miredot.annotations.ReturnType;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
+import io.swagger.annotations.ApiParam;
 
 import java.util.Map;
 import java.util.Set;
@@ -39,9 +41,10 @@ import javax.ws.rs.core.Response;
  * This class is a REST handler for requesting general job worker information.
  */
 @NotThreadSafe
+@Api(value = "/job_worker", description = "Job Worker Rest Service")
 @Path(AlluxioJobWorkerRestServiceHandler.SERVICE_PREFIX)
 @Produces(MediaType.APPLICATION_JSON)
-public final class AlluxioJobWorkerRestServiceHandler {
+public final class  AlluxioJobWorkerRestServiceHandler {
   public static final String SERVICE_PREFIX = "job_worker";
 
   // endpoints
@@ -69,8 +72,11 @@ public final class AlluxioJobWorkerRestServiceHandler {
    */
   @GET
   @Path(GET_INFO)
-  @ReturnType("alluxio.wire.AlluxioJobWorkerInfo")
-  public Response getInfo(@QueryParam(QUERY_RAW_CONFIGURATION) final Boolean rawConfiguration) {
+  @ApiOperation(value = "Get general job worker service information",
+      response = alluxio.wire.AlluxioJobWorkerInfo.class)
+  public Response getInfo(
+      @ApiParam("Returns raw configuration values if true, false be default")
+      @QueryParam(QUERY_RAW_CONFIGURATION) final Boolean rawConfiguration) {
     // TODO(jiri): Add a mechanism for retrieving only a subset of the fields.
     return RestUtils.call(() -> {
       boolean rawConfig = false;
@@ -84,11 +90,11 @@ public final class AlluxioJobWorkerRestServiceHandler {
               .setUptimeMs(mJobWorker.getUptimeMs())
               .setVersion(RuntimeConstants.VERSION);
       return result;
-    });
+    }, ServerConfiguration.global());
   }
 
   private Map<String, String> getConfigurationInternal(boolean raw) {
-    Set<Map.Entry<String, String>> properties = Configuration.toMap().entrySet();
+    Set<Map.Entry<String, String>> properties = ServerConfiguration.toMap().entrySet();
     SortedMap<String, String> configuration = new TreeMap<>();
     for (Map.Entry<String, String> entry : properties) {
       String key = entry.getKey();
@@ -96,7 +102,7 @@ public final class AlluxioJobWorkerRestServiceHandler {
         if (raw) {
           configuration.put(key, entry.getValue());
         } else {
-          configuration.put(key, Configuration.get(PropertyKey.fromString(key)));
+          configuration.put(key, ServerConfiguration.get(PropertyKey.fromString(key)));
         }
       }
     }

@@ -11,8 +11,8 @@
 
 package alluxio.master;
 
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
 import alluxio.exception.ConnectionFailedException;
 import alluxio.util.network.NetworkAddressUtils;
 import alluxio.worker.JobWorkerProcess;
@@ -21,6 +21,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
@@ -32,18 +34,22 @@ import javax.annotation.concurrent.NotThreadSafe;
 public final class LocalAlluxioJobCluster {
   private static final Logger LOG = LoggerFactory.getLogger(LocalAlluxioJobCluster.class);
 
-  private JobMasterProcess mMaster;
+  private AlluxioJobMasterProcess mMaster;
   private JobWorkerProcess mWorker;
+
+  private Map<PropertyKey, String> mConfiguration = new HashMap<>();
 
   private String mHostname;
 
   private Thread mMasterThread;
   private Thread mWorkerThread;
 
+  private boolean mIsRunning = false;
+
   /**
    * Creates a new instance of {@link LocalAlluxioJobCluster}.
    */
-  public LocalAlluxioJobCluster() {}
+  public LocalAlluxioJobCluster() { }
 
   /**
    * Starts both master and a worker using the configurations in test conf respectively.
@@ -59,6 +65,7 @@ public final class LocalAlluxioJobCluster {
     TestUtils.waitForReady(mMaster);
     startWorker();
     TestUtils.waitForReady(mWorker);
+    mIsRunning = true;
   }
 
   /**
@@ -67,15 +74,18 @@ public final class LocalAlluxioJobCluster {
    * @throws Exception when the operation fails
    */
   public void stop() throws Exception {
-    LOG.info("Stop Alluxio job service");
-    mWorker.stop();
-    mMaster.stop();
+    if (mIsRunning) {
+      LOG.info("Stop Alluxio job service");
+      mWorker.stop();
+      mMaster.stop();
+      mIsRunning = false;
+    }
   }
 
   /**
    * @return the job master
    */
-  public JobMasterProcess getMaster() {
+  public AlluxioJobMasterProcess getMaster() {
     return mMaster;
   }
 
@@ -118,15 +128,27 @@ public final class LocalAlluxioJobCluster {
   private void updateTestConf() throws IOException {
     setHostname();
 
-    Configuration.set(PropertyKey.JOB_MASTER_BIND_HOST, mHostname);
-    Configuration.set(PropertyKey.JOB_MASTER_HOSTNAME, mHostname);
-    Configuration.set(PropertyKey.JOB_MASTER_RPC_PORT, Integer.toString(0));
-    Configuration.set(PropertyKey.JOB_MASTER_WEB_PORT, Integer.toString(0));
-    Configuration.set(PropertyKey.JOB_MASTER_WEB_BIND_HOST, mHostname);
-    Configuration.set(PropertyKey.JOB_WORKER_BIND_HOST, mHostname);
-    Configuration.set(PropertyKey.JOB_WORKER_RPC_PORT, Integer.toString(0));
-    Configuration.set(PropertyKey.JOB_WORKER_WEB_PORT, Integer.toString(0));
-    Configuration.set(PropertyKey.JOB_WORKER_WEB_BIND_HOST, mHostname);
+    ServerConfiguration.set(PropertyKey.JOB_MASTER_BIND_HOST, mHostname);
+    ServerConfiguration.set(PropertyKey.JOB_MASTER_HOSTNAME, mHostname);
+    ServerConfiguration.set(PropertyKey.JOB_MASTER_WEB_BIND_HOST, mHostname);
+    ServerConfiguration.set(PropertyKey.JOB_WORKER_BIND_HOST, mHostname);
+    ServerConfiguration.set(PropertyKey.JOB_WORKER_RPC_PORT, Integer.toString(0));
+    ServerConfiguration.set(PropertyKey.JOB_WORKER_WEB_PORT, Integer.toString(0));
+    ServerConfiguration.set(PropertyKey.JOB_WORKER_WEB_BIND_HOST, mHostname);
+
+    for (Map.Entry<PropertyKey, String> e : mConfiguration.entrySet()) {
+      ServerConfiguration.set(e.getKey(), e.getValue());
+    }
+  }
+
+  /**
+   * Overrides properties for the Job Master and Worker before starting.
+   *
+   * @param pk the property key to set
+   * @param value the value to set for the key
+   */
+  public void setProperty(PropertyKey pk, String value) {
+    mConfiguration.put(pk, value);
   }
 
   /**
@@ -136,8 +158,9 @@ public final class LocalAlluxioJobCluster {
    * @throws ConnectionFailedException if network connection failed
    */
   private void startMaster() throws IOException, ConnectionFailedException {
-    mMaster = JobMasterProcess.Factory.create();
-    Configuration
+    mMaster = AlluxioJobMasterProcess.Factory.create();
+
+    ServerConfiguration
         .set(PropertyKey.JOB_MASTER_RPC_PORT, String.valueOf(mMaster.getRpcAddress().getPort()));
     Runnable runMaster = new Runnable() {
       @Override
@@ -179,6 +202,8 @@ public final class LocalAlluxioJobCluster {
    * Sets hostname.
    */
   private void setHostname() {
-    mHostname = NetworkAddressUtils.getLocalHostName(100);
+    mHostname =
+        NetworkAddressUtils.getLocalHostName(
+            (int) ServerConfiguration.getMs(PropertyKey.NETWORK_HOST_RESOLUTION_TIMEOUT_MS));
   }
 }

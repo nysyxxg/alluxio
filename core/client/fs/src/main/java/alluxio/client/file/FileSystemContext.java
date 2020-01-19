@@ -11,37 +11,37 @@
 
 package alluxio.client.file;
 
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import alluxio.AlluxioURI;
+import alluxio.ClientContext;
 import alluxio.client.block.BlockMasterClient;
 import alluxio.client.block.BlockMasterClientPool;
-import alluxio.client.metrics.ClientMasterSync;
-import alluxio.client.metrics.MetricsMasterClient;
-import alluxio.conf.InstancedConfiguration;
+import alluxio.client.block.stream.BlockWorkerClient;
+import alluxio.client.block.stream.BlockWorkerClientPool;
+import alluxio.client.file.FileSystemContextReinitializer.ReinitBlockerResource;
+import alluxio.client.metrics.MetricsHeartbeatContext;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.path.SpecificPathConfiguration;
 import alluxio.exception.ExceptionMessage;
+import alluxio.exception.status.AlluxioStatusException;
 import alluxio.exception.status.UnavailableException;
-import alluxio.heartbeat.HeartbeatContext;
-import alluxio.heartbeat.HeartbeatThread;
-import alluxio.master.MasterClientConfig;
+import alluxio.grpc.GrpcServerAddress;
+import alluxio.master.MasterClientContext;
 import alluxio.master.MasterInquireClient;
-import alluxio.metrics.MetricsSystem;
-import alluxio.network.netty.NettyChannelPool;
-import alluxio.network.netty.NettyClient;
 import alluxio.resource.CloseableResource;
-import alluxio.security.authentication.TransportProviderUtils;
-import alluxio.util.CommonUtils;
+import alluxio.resource.DynamicResourcePool;
+import alluxio.security.authentication.AuthenticationUserUtils;
 import alluxio.util.IdUtils;
-import alluxio.util.ThreadFactoryUtils;
-import alluxio.util.ThreadUtils;
+import alluxio.util.network.NettyUtils;
 import alluxio.util.network.NetworkAddressUtils;
 import alluxio.wire.WorkerInfo;
 import alluxio.wire.WorkerNetAddress;
 
-import com.codahale.metrics.Gauge;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
-import io.netty.bootstrap.Bootstrap;
-import io.netty.channel.Channel;
+import com.google.common.base.Preconditions;
+import io.netty.channel.EventLoopGroup;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,24 +50,34 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 import javax.security.auth.Subject;
 
 /**
- * A shared context that isolates all operations within a {@link FileSystem}. Usually, one user
- * only needs one instance of {@link FileSystemContext}.
+ * An object which houses resources and information for performing {@link FileSystem} operations.
+ * Typically, a single JVM should only need one instance of a {@link FileSystem} to connect to
+ * Alluxio. The reference to that client object should be shared among threads.
  *
- * <p>
- * NOTE: The context maintains a pool of file system master clients that is already thread-safe.
+ * A second {@link FileSystemContext} object should only be created when a user needs to connect to
+ * Alluxio with a different {@link Subject} and/or {@link AlluxioConfiguration}.
+ * {@link FileSystemContext} instances should be created sparingly because each instance creates
+ * its own thread pools of {@link FileSystemMasterClient} and {@link BlockMasterClient} which can
+ * lead to inefficient use of client machine resources.
+ *
+ * A {@link FileSystemContext} should be closed once the user is done performing operations with
+ * Alluxio and no more connections need to be made. Once a {@link FileSystemContext} is closed it
+ * is preferred that the user of the class create a new instance with
+ * {@link FileSystemContext#create} to create a new context, rather than reinitializing using the
+ * {@link FileSystemContext#init} method.
+ *
+ * NOTE: Each context maintains a pool of file system master clients that is already thread-safe.
  * Synchronizing {@link FileSystemContext} methods could lead to deadlock: thread A attempts to
  * acquire a client when there are no clients left in the pool and blocks holding a lock on the
  * {@link FileSystemContext}, when thread B attempts to release a client it owns it is unable to do
@@ -77,167 +87,157 @@ import javax.security.auth.Subject;
 public final class FileSystemContext implements Closeable {
   private static final Logger LOG = LoggerFactory.getLogger(FileSystemContext.class);
 
-  @GuardedBy("CONTEXT_CACHE_LOCK")
-  private static final Map<Subject, FileSystemContext> CONTEXT_CACHE = new HashMap<>();
-  private static final Object CONTEXT_CACHE_LOCK = new Object();
+  /**
+   * Unique ID for each FileSystemContext.
+   * One example usage is to uniquely identify the heartbeat thread for ConfigHashSync.
+   */
+  private final String mId;
 
-  static {
-    MetricsSystem.startSinks();
-    Metrics.initializeGauges();
-  }
+  /**
+   * Marks whether the context has been closed, closing the context means releasing all resources
+   * in the context like clients and thread pools.
+   */
+  private AtomicBoolean mClosed = new AtomicBoolean(false);
 
-  // Master client pools.
+  @GuardedBy("this")
+  private boolean mMetricsEnabled;
+
+  //
+  // Master related resources.
+  //
+  /**
+   * The master client context holding the inquire client.
+   */
+  private volatile MasterClientContext mMasterClientContext;
+  /**
+   * Master client pools.
+   */
   private volatile FileSystemMasterClientPool mFileSystemMasterClientPool;
   private volatile BlockMasterClientPool mBlockMasterClientPool;
 
-  // Closed flag for debugging information.
-  private final AtomicBoolean mClosed;
+  //
+  // Worker related resources.
+  //
+  /**
+   * The data server channel pools. This pool will only grow and keys are not removed.
+   */
+  private final ConcurrentHashMap<ClientPoolKey, BlockWorkerClientPool>
+      mBlockWorkerClientPool = new ConcurrentHashMap<>();
 
-  private ExecutorService mExecutorService;
-  private MetricsMasterClient mMetricsMasterClient;
-  private ClientMasterSync mClientMasterSync;
-
-  private final String mAppId;
-  @GuardedBy("CONTEXT_CACHE_LOCK")
-  private int mRefCount;
-
-  // The netty data server channel pools.
-  private final ConcurrentHashMap<ChannelPoolKey, NettyChannelPool>
-      mNettyChannelPools = new ConcurrentHashMap<>();
-
-  /** The shared master inquire client associated with the {@link FileSystemContext}. */
-  @GuardedBy("this")
-  private MasterInquireClient mMasterInquireClient;
-
+  /**
+   * Used in {@link #mBlockWorkerClientPool}.
+   */
+  private volatile EventLoopGroup mWorkerGroup;
   /**
    * Indicates whether the {@link #mLocalWorker} field has been lazily initialized yet.
    */
   @GuardedBy("this")
   private boolean mLocalWorkerInitialized;
-
   /**
    * The address of any Alluxio worker running on the local machine. This is initialized lazily.
    */
   @GuardedBy("this")
   private WorkerNetAddress mLocalWorker;
 
-  /** The parent user associated with the {@link FileSystemContext}. */
-  private final Subject mParentSubject;
+  /**
+   * Reinitializer contains a daemon heartbeat thread to reinitialize this context when
+   * configuration hashes change.
+   */
+  private volatile FileSystemContextReinitializer mReinitializer;
+
+  /** Whether to do URI scheme validation for file systems using this context.  */
+  private boolean mUriValidationEnabled = true;
 
   /**
-   * @return the instance of file system context with no subject associated
+   * Creates a {@link FileSystemContext} with a null subject.
+   *
+   * @param conf Alluxio configuration
+   * @return an instance of file system context with no subject associated
    */
-  public static FileSystemContext get() {
-    return get(null);
-  }
-
-  /**
-   * @param subject the subject associated with this context
-   * @return the instance of the file system context, possibly a shared context
-   */
-  public static FileSystemContext get(Subject subject) {
-    synchronized (CONTEXT_CACHE_LOCK) {
-      FileSystemContext ctx = CONTEXT_CACHE.computeIfAbsent(subject, FileSystemContext::create);
-      ctx.mRefCount++;
-      return ctx;
-    }
+  public static FileSystemContext create(AlluxioConfiguration conf) {
+    Preconditions.checkNotNull(conf);
+    return create(null, conf);
   }
 
   /**
    * @param subject the parent subject, set to null if not present
-   * @return the context
+   * @param conf Alluxio configuration
+   * @return a context
    */
-  private static FileSystemContext create(Subject subject) {
-    FileSystemContext context = new FileSystemContext(subject);
-    context.init(MasterInquireClient.Factory.create(), Configuration.global());
+  public static FileSystemContext create(@Nullable Subject subject,
+      @Nullable AlluxioConfiguration conf) {
+    FileSystemContext context = new FileSystemContext();
+    ClientContext ctx = ClientContext.create(subject, conf);
+    MasterInquireClient inquireClient =
+        MasterInquireClient.Factory.create(ctx.getClusterConf(), ctx.getUserState());
+    context.init(ctx, inquireClient);
     return context;
   }
 
   /**
-   * This method is provided for testing, use the {@link FileSystemContext#get} methods. The
+   * @param clientContext the {@link alluxio.ClientContext} containing the subject and configuration
+   * @return the {@link alluxio.client.file.FileSystemContext}
+   */
+  public static FileSystemContext create(ClientContext clientContext) {
+    FileSystemContext ctx = new FileSystemContext();
+    ctx.init(clientContext, MasterInquireClient.Factory.create(clientContext.getClusterConf(),
+        clientContext.getUserState()));
+    return ctx;
+  }
+
+  /**
+   * This method is provided for testing, use the {@link FileSystemContext#create} methods. The
    * returned context object will not be cached automatically.
    *
    * @param subject the parent subject, set to null if not present
    * @param masterInquireClient the client to use for determining the master; note that if the
    *        context is reset, this client will be replaced with a new masterInquireClient based on
-   *        global configuration
+   *        the original configuration.
+   * @param alluxioConf Alluxio configuration
    * @return the context
    */
   @VisibleForTesting
-  public static FileSystemContext create(Subject subject, MasterInquireClient masterInquireClient) {
-    FileSystemContext context = new FileSystemContext(subject);
-    context.init(masterInquireClient, Configuration.global());
-    synchronized (CONTEXT_CACHE_LOCK) { // Not necessary, for code consistency
-      context.mRefCount++;
-    }
+  public static FileSystemContext create(Subject subject, MasterInquireClient masterInquireClient,
+      AlluxioConfiguration alluxioConf) {
+    FileSystemContext context = new FileSystemContext();
+    ClientContext ctx = ClientContext.create(subject, alluxioConf);
+    context.init(ctx, masterInquireClient);
     return context;
   }
 
   /**
-   * Clears the context cache. This method should only be called in test code.
+   * Initializes FileSystemContext ID.
    */
-  @VisibleForTesting
-  public static void clearCache() {
-    synchronized (CONTEXT_CACHE_LOCK) {
-      CONTEXT_CACHE.clear();
-    }
+  private FileSystemContext() {
+    mId = IdUtils.createFileSystemContextId();
   }
 
   /**
-   * Creates a file system context with a subject.
-   *
-   * @param subject the parent subject, set to null if not present
-   */
-  private FileSystemContext(Subject subject) {
-    mParentSubject = subject;
-    mExecutorService = Executors.newFixedThreadPool(1,
-        ThreadFactoryUtils.build("metrics-master-heartbeat-%d", true));
-    mAppId = Configuration.containsKey(PropertyKey.USER_APP_ID)
-        ? Configuration.get(PropertyKey.USER_APP_ID) : IdUtils.createFileSystemContextId();
-    LOG.info("Created filesystem context with id {}. This ID will be used for identifying info "
-        + "from the client, such as metrics. It can be set manually through the {} property",
-        mAppId, PropertyKey.Name.USER_APP_ID);
-    mClosed = new AtomicBoolean(false);
-    mRefCount = 0;
-  }
-
-  /**
-   * Initializes the context. Only called in the factory methods and reset.
+   * Initializes the context. Only called in the factory methods.
    *
    * @param masterInquireClient the client to use for determining the master
-   * @param configuration the instance configuration
    */
-  private synchronized void init(MasterInquireClient masterInquireClient,
-      InstancedConfiguration configuration) {
-    mMasterInquireClient = masterInquireClient;
-    mFileSystemMasterClientPool =
-        new FileSystemMasterClientPool(mParentSubject, mMasterInquireClient);
-    mBlockMasterClientPool = new BlockMasterClientPool(mParentSubject, mMasterInquireClient);
-    mClosed.set(false);
+  private synchronized void init(ClientContext clientContext,
+      MasterInquireClient masterInquireClient) {
+    initContext(clientContext, masterInquireClient);
+    mReinitializer = new FileSystemContextReinitializer(this);
+  }
 
-    if (configuration.getBoolean(PropertyKey.USER_METRICS_COLLECTION_ENABLED)) {
-      // setup metrics master client sync
-      mMetricsMasterClient = new MetricsMasterClient(MasterClientConfig.defaults()
-          .withSubject(mParentSubject).withMasterInquireClient(mMasterInquireClient));
-      mClientMasterSync = new ClientMasterSync(mMetricsMasterClient, this);
-      mExecutorService = Executors.newFixedThreadPool(1,
-          ThreadFactoryUtils.build("metrics-master-heartbeat-%d", true));
-      mExecutorService
-          .submit(new HeartbeatThread(HeartbeatContext.MASTER_METRICS_SYNC, mClientMasterSync,
-              (int) configuration.getMs(PropertyKey.USER_METRICS_HEARTBEAT_INTERVAL_MS)));
-      // register the shutdown hook
-      try {
-        Runtime.getRuntime().addShutdownHook(new MetricsMasterSyncShutDownHook());
-      } catch (IllegalStateException e) {
-        // this exception is thrown when the system is already in the process of shutting down. In
-        // such a situation, we are about to shutdown anyway and there is no need to register this
-        // shutdown hook
-      } catch (SecurityException e) {
-        LOG.info("Not registering metrics shutdown hook due to security exception. Regular "
-            + "heartbeats will still be performed to collect metrics data, but no final heartbeat "
-            + "will be performed on JVM exit. Security exception: {}", e.toString());
-      }
+  private synchronized void initContext(ClientContext ctx,
+      MasterInquireClient masterInquireClient) {
+    mClosed.set(false);
+    mMasterClientContext = MasterClientContext.newBuilder(ctx)
+        .setMasterInquireClient(masterInquireClient).build();
+    mFileSystemMasterClientPool = new FileSystemMasterClientPool(mMasterClientContext);
+    mBlockMasterClientPool = new BlockMasterClientPool(mMasterClientContext);
+    mWorkerGroup = NettyUtils.createEventLoop(NettyUtils.getUserChannel(getClusterConf()),
+        getClusterConf().getInt(PropertyKey.USER_NETWORK_NETTY_WORKER_THREADS),
+        String.format("alluxio-client-nettyPool-%s-%%d", mId), true);
+    mMetricsEnabled = getClusterConf().getBoolean(PropertyKey.USER_METRICS_COLLECTION_ENABLED);
+    if (mMetricsEnabled) {
+      MetricsHeartbeatContext.addHeartbeat(getClientContext(), masterInquireClient);
     }
+    mUriValidationEnabled = ctx.getUriValidationEnabled();
   }
 
   /**
@@ -246,73 +246,146 @@ public final class FileSystemContext implements Closeable {
    * that acquired from this context might fail. Only call this when you are done with using
    * the {@link FileSystem} associated with this {@link FileSystemContext}.
    */
-  @Override
-  public void close() throws IOException {
-    synchronized (CONTEXT_CACHE_LOCK) {
-      if (mRefCount == 0) {
-        LOG.warn("Attempted to close FileSystem Context that is already closed, have you called "
-            + "close multiple times?");
-        return;
-      }
-      if (--mRefCount != 0) {
-        return;
-      } else {
-        CONTEXT_CACHE.remove(mParentSubject);
-      }
-    }
-    closeInternal();
+  public synchronized void close() throws IOException {
+    mReinitializer.close();
+    closeContext();
   }
 
-  private void closeInternal() throws IOException {
-    mFileSystemMasterClientPool.close();
-    mFileSystemMasterClientPool = null;
-    mBlockMasterClientPool.close();
-    mBlockMasterClientPool = null;
-    mMasterInquireClient = null;
-
-    for (NettyChannelPool pool : mNettyChannelPools.values()) {
-      pool.close();
-    }
-    mNettyChannelPools.clear();
-
-    synchronized (this) {
-      if (mMetricsMasterClient != null) {
-        ThreadUtils.shutdownAndAwaitTermination(mExecutorService,
-            Configuration.getMs(PropertyKey.METRICS_CONTEXT_SHUTDOWN_TIMEOUT));
-        mMetricsMasterClient.close();
-        mMetricsMasterClient = null;
-        mClientMasterSync = null;
+  private synchronized void closeContext() throws IOException {
+    if (!mClosed.get()) {
+      // Setting closed should be the first thing we do because if any of the close operations
+      // fail we'll only have a half-closed object and performing any more operations or closing
+      // again on a half-closed object can possibly result in more errors (i.e. NPE). Setting
+      // closed first is also recommended by the JDK that in implementations of #close() that
+      // developers should first mark their resources as closed prior to any exceptions being
+      // thrown.
+      mClosed.set(true);
+      mFileSystemMasterClientPool.close();
+      mFileSystemMasterClientPool = null;
+      mBlockMasterClientPool.close();
+      mBlockMasterClientPool = null;
+      for (BlockWorkerClientPool pool : mBlockWorkerClientPool.values()) {
+        pool.close();
       }
+      // Close worker group after block master clients in order to allow
+      // clean termination for open streams.
+      mWorkerGroup.shutdownGracefully(1L, 10L, TimeUnit.SECONDS);
+      mBlockWorkerClientPool.clear();
       mLocalWorkerInitialized = false;
       mLocalWorker = null;
-      mClosed.set(true);
+
+      if (mMetricsEnabled) {
+        MetricsHeartbeatContext.removeHeartbeat(getClientContext());
+      }
+    } else {
+      LOG.warn("Attempted to close FileSystemContext which has already been closed or not "
+          + "initialized.");
     }
   }
 
   /**
-   * Resets the context. It is only used in {@link alluxio.hadoop.AbstractFileSystem} and tests to
-   * reset the default file system context.
+   * Acquires the resource to block reinitialization.
    *
-   * @param configuration the instance configuration
+   * If reinitialization is happening, this method will block until reinitialization succeeds or
+   * fails, if it fails, a RuntimeException will be thrown explaining the
+   * reinitialization's failure and automatically closes the resource.
    *
+   * RuntimeException is thrown because this method is called before requiring resources from the
+   * context, if reinitialization fails, the resources might be half closed, to prevent resource
+   * leaks, we thrown RuntimeException here to force callers to fail since there is no way to
+   * recover.
+   *
+   * @return the resource
    */
-  public synchronized void reset(InstancedConfiguration configuration) throws IOException {
-    closeInternal();
-    init(MasterInquireClient.Factory.create(), configuration);
+  public ReinitBlockerResource blockReinit() {
+    try {
+      return mReinitializer.block();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
   }
 
   /**
-   * @return the unique id of the context
+   * Closes the context, updates configuration from meta master, then re-initializes the context.
+   *
+   * The reinitializer is not closed, which means the heartbeat thread inside it is not stopped.
+   * The reinitializer will be reset with the updated context if reinitialization succeeds,
+   * otherwise, the reinitializer is not reset.
+   *
+   * Blocks until there is no active RPCs.
+   *
+   * @param updateClusterConf whether cluster level configuration should be updated
+   * @param updatePathConf whether path level configuration should be updated
+   * @throws UnavailableException when failed to load configuration from master
+   * @throws IOException when failed to close the context
+   */
+  public void reinit(boolean updateClusterConf, boolean updatePathConf)
+      throws UnavailableException, IOException {
+    try (Closeable r = mReinitializer.allow()) {
+      InetSocketAddress masterAddr;
+      try {
+        masterAddr = getMasterAddress();
+      } catch (IOException e) {
+        throw new UnavailableException("Failed to get master address during reinitialization", e);
+      }
+      try {
+        getClientContext().loadConf(masterAddr, updateClusterConf, updatePathConf);
+      } catch (AlluxioStatusException e) {
+        // Failed to load configuration from meta master, maybe master is being restarted,
+        // or their is a temporary network problem, give up reinitialization. The heartbeat thread
+        // will try to reinitialize in the next heartbeat.
+        throw new UnavailableException(String.format("Failed to load configuration from "
+            + "meta master (%s) during reinitialization", masterAddr), e);
+      }
+      closeContext();
+      initContext(getClientContext(), MasterInquireClient.Factory.create(getClusterConf(),
+          getClientContext().getUserState()));
+      mReinitializer.onSuccess();
+    }
+  }
+
+  /**
+   * @return the unique ID of this context
    */
   public String getId() {
-    return mAppId;
+    return mId;
   }
 
   /**
-   * @return the parent subject
+   * @return the {@link MasterClientContext} backing this context
    */
-  public Subject getParentSubject() {
-    return mParentSubject;
+  public MasterClientContext getMasterClientContext() {
+    return mMasterClientContext;
+  }
+
+  /**
+   * @return the {@link ClientContext} backing this {@link FileSystemContext}
+   */
+  public ClientContext getClientContext() {
+    return mMasterClientContext;
+  }
+
+  /**
+   * @return the cluster level configuration backing this {@link FileSystemContext}
+   */
+  public AlluxioConfiguration getClusterConf() {
+    return getClientContext().getClusterConf();
+  }
+
+  /**
+   * The path level configuration is a {@link SpecificPathConfiguration}.
+   *
+   * If path level configuration has never been loaded from meta master yet, it will be loaded.
+   *
+   * @param path the path to get the configuration for
+   * @return the path level configuration for the specific path
+   */
+  public AlluxioConfiguration getPathConf(AlluxioURI path) {
+    return new SpecificPathConfiguration(getClientContext().getClusterConf(),
+        getClientContext().getPathConf(), path);
   }
 
   /**
@@ -320,32 +393,14 @@ public final class FileSystemContext implements Closeable {
    * @throws UnavailableException if the master address cannot be determined
    */
   public synchronized InetSocketAddress getMasterAddress() throws UnavailableException {
-    return mMasterInquireClient.getPrimaryRpcAddress();
+    return mMasterClientContext.getMasterInquireClient().getPrimaryRpcAddress();
   }
 
   /**
-   * @return the master inquire client
+   * @return {@code true} if URI validation is enabled
    */
-  public synchronized MasterInquireClient getMasterInquireClient() {
-    return mMasterInquireClient;
-  }
-
-  /**
-   * Acquires a file system master client from the file system master client pool.
-   *
-   * @return the acquired file system master client
-   */
-  public FileSystemMasterClient acquireMasterClient() {
-    return mFileSystemMasterClientPool.acquire();
-  }
-
-  /**
-   * Releases a file system master client into the file system master client pool.
-   *
-   * @param masterClient a file system master client to release
-   */
-  public void releaseMasterClient(FileSystemMasterClient masterClient) {
-    mFileSystemMasterClientPool.release(masterClient);
+  public synchronized boolean getUriValidationEnabled() {
+    return mUriValidationEnabled;
   }
 
   /**
@@ -355,12 +410,9 @@ public final class FileSystemContext implements Closeable {
    * @return the acquired file system master client resource
    */
   public CloseableResource<FileSystemMasterClient> acquireMasterClientResource() {
-    return new CloseableResource<FileSystemMasterClient>(mFileSystemMasterClientPool.acquire()) {
-      @Override
-      public void close() {
-        mFileSystemMasterClientPool.release(get());
-      }
-    };
+    try (ReinitBlockerResource r = blockReinit()) {
+      return acquireClosableClientResource(mFileSystemMasterClientPool);
+    }
   }
 
   /**
@@ -370,56 +422,112 @@ public final class FileSystemContext implements Closeable {
    * @return the acquired block master client resource
    */
   public CloseableResource<BlockMasterClient> acquireBlockMasterClientResource() {
-    return new CloseableResource<BlockMasterClient>(mBlockMasterClientPool.acquire()) {
+    try (ReinitBlockerResource r = blockReinit()) {
+      return acquireClosableClientResource(mBlockMasterClientPool);
+    }
+  }
+
+  /**
+   * Acquire a client resource from {@link #mBlockMasterClientPool} or
+   * {@link #mFileSystemMasterClientPool}.
+   *
+   * Because it's possible for a context re-initialization to occur while the resource is
+   * acquired this method uses an inline class which will save the reference to the pool used to
+   * acquire the resource.
+   *
+   * There are three different cases to which may occur during the release of the resource
+   *
+   * 1. release while the context is re-initializing
+   *    - The original {@link #mBlockMasterClientPool} or {@link #mFileSystemMasterClientPool}
+   *    may be null, closed, or overwritten with a difference pool. The inner class here saves
+   *    the original pool from being GCed because it holds a reference to the pool that was used
+   *    to acquire the client initially. Releasing into the closed pool is harmless.
+   * 2. release after the context has been re-initialized
+   *    - Similar to the above scenario the original {@link #mBlockMasterClientPool} or
+   *    {@link #mFileSystemMasterClientPool} are going to be using an entirely new pool. Since
+   *    this method will save the original pool reference, this method would result in releasing
+   *    into a closed pool which is harmless
+   * 3. release before any re-initialization
+   *    - This is the normal case. There are no special considerations
+   *
+   * @param pool the pool to acquire from and release to
+   * @param <T> the resource type
+   * @return a {@link CloseableResource}
+   */
+  private <T> CloseableResource<T> acquireClosableClientResource(DynamicResourcePool<T> pool) {
+    try {
+      return new CloseableResource<T>(pool.acquire()) {
+        @Override
+        public void close() {
+          pool.release(get());
+        }
+      };
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  /**
+   * Acquires a block worker client from the client pools. If there is no available client instance
+   * available in the pool, it tries to create a new one. And an exception is thrown if it fails to
+   * create a new one.
+   *
+   * @param workerNetAddress the network address of the channel
+   * @return the acquired block worker resource
+   */
+  public CloseableResource<BlockWorkerClient> acquireBlockWorkerClient(
+      final WorkerNetAddress workerNetAddress)
+      throws IOException {
+    try (ReinitBlockerResource r = blockReinit()) {
+      return acquireBlockWorkerClientInternal(workerNetAddress, getClientContext());
+    }
+  }
+
+  private CloseableResource<BlockWorkerClient> acquireBlockWorkerClientInternal(
+      final WorkerNetAddress workerNetAddress, final ClientContext context) throws IOException {
+    SocketAddress address = NetworkAddressUtils
+        .getDataPortSocketAddress(workerNetAddress, context.getClusterConf());
+    GrpcServerAddress serverAddress = GrpcServerAddress.create(workerNetAddress.getHost(), address);
+    ClientPoolKey key = new ClientPoolKey(address, AuthenticationUserUtils
+            .getImpersonationUser(context.getSubject(), context.getClusterConf()));
+    final ConcurrentHashMap<ClientPoolKey, BlockWorkerClientPool> poolMap =
+        mBlockWorkerClientPool;
+    return new CloseableResource<BlockWorkerClient>(poolMap.computeIfAbsent(key,
+        k -> new BlockWorkerClientPool(context.getSubject(), serverAddress,
+            context.getClusterConf().getInt(PropertyKey.USER_BLOCK_WORKER_CLIENT_POOL_SIZE),
+            context.getClusterConf(), mWorkerGroup))
+        .acquire()) {
+      // Save the reference to the original pool map.
       @Override
       public void close() {
-        mBlockMasterClientPool.release(get());
+        releaseBlockWorkerClient(workerNetAddress, get(), context, poolMap);
       }
     };
   }
 
   /**
-   * Acquires a netty channel from the channel pools. If there is no available client instance
-   * available in the pool, it tries to create a new one. And an exception is thrown if it fails to
-   * create a new one.
-   *
-   * @param workerNetAddress the network address of the channel
-   * @return the acquired netty channel
-   */
-  public Channel acquireNettyChannel(final WorkerNetAddress workerNetAddress) throws IOException {
-    SocketAddress address = NetworkAddressUtils.getDataPortSocketAddress(workerNetAddress);
-    ChannelPoolKey key =
-        new ChannelPoolKey(address, TransportProviderUtils.getImpersonationUser(mParentSubject));
-    if (!mNettyChannelPools.containsKey(key)) {
-      Bootstrap bs = NettyClient.createClientBootstrap(mParentSubject, address);
-      bs.remoteAddress(address);
-      NettyChannelPool pool = new NettyChannelPool(bs,
-          Configuration.getInt(PropertyKey.USER_NETWORK_NETTY_CHANNEL_POOL_SIZE_MAX),
-          Configuration.getMs(PropertyKey.USER_NETWORK_NETTY_CHANNEL_POOL_GC_THRESHOLD_MS));
-      if (mNettyChannelPools.putIfAbsent(key, pool) != null) {
-        // This can happen if this function is called concurrently.
-        pool.close();
-      }
-    }
-    return mNettyChannelPools.get(key).acquire();
-  }
-
-  /**
-   * Releases a netty channel to the channel pools.
+   * Releases a block worker client to the client pools.
    *
    * @param workerNetAddress the address of the channel
-   * @param channel the channel to release
+   * @param client the client to release
    */
-  public void releaseNettyChannel(WorkerNetAddress workerNetAddress, Channel channel) {
-    SocketAddress address = NetworkAddressUtils.getDataPortSocketAddress(workerNetAddress);
-    ChannelPoolKey key =
-        new ChannelPoolKey(address, TransportProviderUtils.getImpersonationUser(mParentSubject));
-    if (mNettyChannelPools.containsKey(key)) {
-      mNettyChannelPools.get(key).release(channel);
+  private static void releaseBlockWorkerClient(WorkerNetAddress workerNetAddress,
+      BlockWorkerClient client, final ClientContext context, ConcurrentHashMap<ClientPoolKey,
+      BlockWorkerClientPool> poolMap) {
+    SocketAddress address = NetworkAddressUtils.getDataPortSocketAddress(workerNetAddress,
+        context.getClusterConf());
+    ClientPoolKey key = new ClientPoolKey(address, AuthenticationUserUtils.getImpersonationUser(
+        context.getSubject(), context.getClusterConf()));
+    if (poolMap.containsKey(key)) {
+      poolMap.get(key).release(client);
     } else {
-      LOG.warn("No channel pool for key {}, closing channel instead. Context is closed: {}",
-          key, mClosed.get());
-      CommonUtils.closeChannel(channel);
+      LOG.warn("No client pool for key {}, closing client instead. Context may have been closed",
+          key);
+      try {
+        client.close();
+      } catch (IOException e) {
+        LOG.warn("Error closing block worker client for key {}", key, e);
+      }
     }
   }
 
@@ -446,7 +554,8 @@ public final class FileSystemContext implements Closeable {
   private void initializeLocalWorker() throws IOException {
     List<WorkerNetAddress> addresses = getWorkerAddresses();
     if (!addresses.isEmpty()) {
-      if (addresses.get(0).getHost().equals(NetworkAddressUtils.getClientHostName())) {
+      if (addresses.get(0).getHost().equals(NetworkAddressUtils.getClientHostName(
+          getClusterConf()))) {
         mLocalWorker = addresses.get(0);
       }
     }
@@ -472,7 +581,7 @@ public final class FileSystemContext implements Closeable {
     // Convert the worker infos into net addresses, if there are local addresses, only keep those
     List<WorkerNetAddress> workerNetAddresses = new ArrayList<>();
     List<WorkerNetAddress> localWorkerNetAddresses = new ArrayList<>();
-    String localHostname = NetworkAddressUtils.getClientHostName();
+    String localHostname = NetworkAddressUtils.getClientHostName(getClusterConf());
     for (WorkerInfo info : infos) {
       WorkerNetAddress netAddress = info.getAddress();
       if (netAddress.getHost().equals(localHostname)) {
@@ -485,76 +594,14 @@ public final class FileSystemContext implements Closeable {
   }
 
   /**
-   * Class that heartbeats to the metrics master before exit. The heartbeat is performed in a second
-   * thread so that we can exit early if the heartbeat is taking too long.
+   * Key for block worker client pools. This requires both the worker address and the username, so
+   * that block workers are created for different users.
    */
-  private final class MetricsMasterSyncShutDownHook extends Thread {
-    private final Thread mLastHeartbeatThread;
-
-    /**
-     * Creates a new metrics master shutdown hook.
-     */
-    public MetricsMasterSyncShutDownHook() {
-      mLastHeartbeatThread = new Thread(() -> {
-        if (mClientMasterSync != null) {
-          try {
-            mClientMasterSync.heartbeat();
-          } catch (InterruptedException e) {
-            return;
-          }
-        }
-      });
-      mLastHeartbeatThread.setDaemon(true);
-    }
-
-    @Override
-    public void run() {
-      mLastHeartbeatThread.start();
-      try {
-        // Shutdown hooks should run quickly, so we limit the wait time to 500ms. It isn't the end
-        // of the world if the final heartbeat fails.
-        mLastHeartbeatThread.join(500);
-      } catch (InterruptedException e) {
-        return;
-      } finally {
-        if (mLastHeartbeatThread.isAlive()) {
-          LOG.warn("Failed to heartbeat to the metrics master before exit");
-        }
-      }
-    }
-  }
-
-  /**
-   * Class that contains metrics about FileSystemContext.
-   */
-  @ThreadSafe
-  private static final class Metrics {
-    private static void initializeGauges() {
-      MetricsSystem.registerGaugeIfAbsent(MetricsSystem.getMetricName("NettyConnectionsOpen"),
-          new Gauge<Long>() {
-            @Override
-            public Long getValue() {
-              long ret = 0;
-              for (NettyChannelPool pool : get().mNettyChannelPools.values()) {
-                ret += pool.size();
-              }
-              return ret;
-            }
-          });
-    }
-
-    private Metrics() {} // prevent instantiation
-  }
-
-  /**
-   * Key for Netty channel pools. This requires both the worker address and the username, so that
-   * netty channels are created for different users.
-   */
-  private static final class ChannelPoolKey {
+  private static final class ClientPoolKey {
     private final SocketAddress mSocketAddress;
     private final String mUsername;
 
-    public ChannelPoolKey(SocketAddress socketAddress, String username) {
+    public ClientPoolKey(SocketAddress socketAddress, String username) {
       mSocketAddress = socketAddress;
       mUsername = username;
     }
@@ -569,17 +616,17 @@ public final class FileSystemContext implements Closeable {
       if (this == o) {
         return true;
       }
-      if (!(o instanceof ChannelPoolKey)) {
+      if (!(o instanceof ClientPoolKey)) {
         return false;
       }
-      ChannelPoolKey that = (ChannelPoolKey) o;
+      ClientPoolKey that = (ClientPoolKey) o;
       return Objects.equal(mSocketAddress, that.mSocketAddress)
           && Objects.equal(mUsername, that.mUsername);
     }
 
     @Override
     public String toString() {
-      return Objects.toStringHelper(this)
+      return MoreObjects.toStringHelper(this)
           .add("socketAddress", mSocketAddress)
           .add("username", mUsername)
           .toString();

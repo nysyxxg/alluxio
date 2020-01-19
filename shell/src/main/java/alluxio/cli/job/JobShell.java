@@ -11,12 +11,11 @@
 
 package alluxio.cli.job;
 
-import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.client.file.FileSystemContext;
+import alluxio.conf.InstancedConfiguration;
 import alluxio.cli.AbstractShell;
 import alluxio.cli.Command;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
 import alluxio.util.ConfigurationUtils;
 
 import com.google.common.collect.ImmutableMap;
@@ -45,18 +44,15 @@ public final class JobShell extends AbstractShell {
    */
   public static void main(String[] argv) throws IOException {
     int ret;
+    InstancedConfiguration conf = new InstancedConfiguration(ConfigurationUtils.defaults());
 
-    if (!ConfigurationUtils.masterHostConfigured() && argv.length > 0) {
-      System.out.println(String.format(
-          "Cannot run alluxio job shell; master hostname is not "
-              + "configured. Please modify %s to either set %s or configure zookeeper with "
-              + "%s=true and %s=[comma-separated zookeeper master addresses]",
-          Constants.SITE_PROPERTIES, PropertyKey.MASTER_HOSTNAME.toString(),
-          PropertyKey.ZOOKEEPER_ENABLED.toString(), PropertyKey.ZOOKEEPER_ADDRESS.toString()));
+    if (!ConfigurationUtils.masterHostConfigured(conf) && argv.length > 0) {
+      System.out.println(ConfigurationUtils
+          .getMasterHostNotConfiguredMessage("Alluxio job shell"));
       System.exit(1);
     }
 
-    try (JobShell shell = new JobShell()) {
+    try (JobShell shell = new JobShell(conf)) {
       ret = shell.run(argv);
     }
     System.exit(ret);
@@ -64,9 +60,11 @@ public final class JobShell extends AbstractShell {
 
   /**
    * Creates a new instance of {@link JobShell}.
+   *
+   * @param alluxioConf Alluxio configuration
    */
-  public JobShell() {
-    super(CMD_ALIAS);
+  public JobShell(InstancedConfiguration alluxioConf) {
+    super(CMD_ALIAS, null, alluxioConf);
   }
 
   @Override
@@ -77,6 +75,7 @@ public final class JobShell extends AbstractShell {
   @Override
   protected Map<String, Command> loadCommands() {
     return CommandUtils.loadCommands(JobShell.class.getPackage().getName(),
-        new Class[] {FileSystem.class}, new Object[] {FileSystem.Factory.get()});
+        new Class[] {FileSystemContext.class},
+        new Object[] {mCloser.register(FileSystemContext.create(mConfiguration))});
   }
 }

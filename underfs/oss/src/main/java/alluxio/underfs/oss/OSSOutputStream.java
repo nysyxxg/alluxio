@@ -14,7 +14,7 @@ package alluxio.underfs.oss;
 import alluxio.util.CommonUtils;
 import alluxio.util.io.PathUtils;
 
-import com.aliyun.oss.OSSClient;
+import com.aliyun.oss.OSS;
 import com.aliyun.oss.ServiceException;
 import com.aliyun.oss.model.ObjectMetadata;
 import com.google.common.base.Preconditions;
@@ -32,6 +32,7 @@ import java.io.OutputStream;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -52,7 +53,7 @@ public final class OSSOutputStream extends OutputStream {
   /** The local file that will be uploaded when the stream is closed. */
   private final File mFile;
   /** The oss client for OSS operations. */
-  private final OSSClient mOssClient;
+  private final OSS mOssClient;
 
   /** The OutputStream to a local file where the file will be buffered until closed. */
   private OutputStream mLocalOutputStream;
@@ -68,8 +69,10 @@ public final class OSSOutputStream extends OutputStream {
    * @param bucketName the name of the bucket
    * @param key the key of the file
    * @param client the client for OSS
+   * @param tmpDirs a list of temporary directories
    */
-  public OSSOutputStream(String bucketName, String key, OSSClient client) throws IOException {
+  public OSSOutputStream(String bucketName, String key, OSS client, List<String> tmpDirs)
+      throws IOException {
     Preconditions.checkArgument(bucketName != null && !bucketName.isEmpty(),
         "Bucket name must not be null or empty.");
     Preconditions.checkArgument(key != null && !key.isEmpty(),
@@ -79,7 +82,7 @@ public final class OSSOutputStream extends OutputStream {
     mKey = key;
     mOssClient = client;
 
-    mFile = new File(PathUtils.concatPath(CommonUtils.getTmpDir(), UUID.randomUUID()));
+    mFile = new File(PathUtils.concatPath(CommonUtils.getTmpDir(tmpDirs), UUID.randomUUID()));
 
     try {
       mHash = MessageDigest.getInstance("MD5");

@@ -11,14 +11,16 @@
 
 package alluxio.master.job.command;
 
+import alluxio.grpc.CancelTaskCommand;
+import alluxio.grpc.JobCommand;
+import alluxio.grpc.RunTaskCommand;
+import alluxio.grpc.SetTaskPoolSizeCommand;
 import alluxio.job.JobConfig;
 import alluxio.job.util.SerializationUtils;
-import alluxio.thrift.CancelTaskCommand;
-import alluxio.thrift.JobCommand;
-import alluxio.thrift.RunTaskCommand;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,25 +55,24 @@ public final class CommandManager {
    * @param taskArgs the arguments passed to the executor on the worker
    * @param workerId the id of the worker
    */
-  public synchronized void submitRunTaskCommand(long jobId, int taskId, JobConfig jobConfig,
+  public synchronized void submitRunTaskCommand(long jobId, long taskId, JobConfig jobConfig,
       Object taskArgs, long workerId) {
-    RunTaskCommand runTaskCommand = new RunTaskCommand();
+    RunTaskCommand.Builder runTaskCommand = RunTaskCommand.newBuilder();
     runTaskCommand.setJobId(jobId);
     runTaskCommand.setTaskId(taskId);
     try {
-      runTaskCommand.setJobConfig(SerializationUtils.serialize(jobConfig));
-      runTaskCommand.setTaskArgs(SerializationUtils.serialize(taskArgs));
+      runTaskCommand.setJobConfig(ByteString.copyFrom(SerializationUtils.serialize(jobConfig)));
+      if (taskArgs != null) {
+        runTaskCommand.setTaskArgs(ByteString.copyFrom(SerializationUtils.serialize(taskArgs)));
+      }
     } catch (IOException e) {
       // TODO(yupeng) better exception handling
       LOG.info("Failed to serialize the run task command:" + e);
       return;
     }
-    JobCommand command = new JobCommand();
+    JobCommand.Builder command = JobCommand.newBuilder();
     command.setRunTaskCommand(runTaskCommand);
-    if (!mWorkerIdToPendingCommands.containsKey(workerId)) {
-      mWorkerIdToPendingCommands.put(workerId, Lists.<JobCommand>newArrayList());
-    }
-    mWorkerIdToPendingCommands.get(workerId).add(command);
+    submit(workerId, command);
   }
 
   /**
@@ -81,16 +82,35 @@ public final class CommandManager {
    * @param taskId the task id
    * @param workerId the worker id
    */
-  public synchronized void submitCancelTaskCommand(long jobId, int taskId, long workerId) {
-    CancelTaskCommand cancelTaskCommand = new CancelTaskCommand();
+  public synchronized void submitCancelTaskCommand(long jobId, long taskId, long workerId) {
+    CancelTaskCommand.Builder cancelTaskCommand = CancelTaskCommand.newBuilder();
     cancelTaskCommand.setJobId(jobId);
     cancelTaskCommand.setTaskId(taskId);
-    JobCommand command = new JobCommand();
+    JobCommand.Builder command = JobCommand.newBuilder();
     command.setCancelTaskCommand(cancelTaskCommand);
+    submit(workerId, command);
+  }
+
+  /**
+   * Submits a set thread pool size command to specific worker.
+   *
+   * @param workerId the worker id
+   * @param taskPoolSize the task pool size
+   */
+  public synchronized void submitSetTaskPoolSizeCommand(long workerId, int taskPoolSize) {
+    SetTaskPoolSizeCommand.Builder setTaskPoolSizeCommand = SetTaskPoolSizeCommand.newBuilder();
+    setTaskPoolSizeCommand.setTaskPoolSize(taskPoolSize);
+
+    JobCommand.Builder command = JobCommand.newBuilder();
+    command.setSetTaskPoolSizeCommand(setTaskPoolSizeCommand);
+    submit(workerId, command);
+  }
+
+  private synchronized void submit(long workerId, JobCommand.Builder command) {
     if (!mWorkerIdToPendingCommands.containsKey(workerId)) {
-      mWorkerIdToPendingCommands.put(workerId, Lists.<JobCommand>newArrayList());
+      mWorkerIdToPendingCommands.put(workerId, Lists.newArrayList());
     }
-    mWorkerIdToPendingCommands.get(workerId).add(command);
+    mWorkerIdToPendingCommands.get(workerId).add(command.build());
   }
 
   /**
@@ -99,7 +119,7 @@ public final class CommandManager {
    * @param workerId id of the worker to send the commands to
    * @return the list of the commends polled
    */
-  public synchronized List<JobCommand> pollAllPendingCommands(long workerId) {
+  public synchronized List<alluxio.grpc.JobCommand> pollAllPendingCommands(long workerId) {
     if (!mWorkerIdToPendingCommands.containsKey(workerId)) {
       return Lists.newArrayList();
     }

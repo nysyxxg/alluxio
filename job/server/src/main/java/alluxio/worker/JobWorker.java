@@ -11,29 +11,35 @@
 
 package alluxio.worker;
 
-import alluxio.Configuration;
+import alluxio.ClientContext;
+import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
+import alluxio.conf.ServerConfiguration;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
 import alluxio.Server;
 import alluxio.exception.ConnectionFailedException;
+import alluxio.grpc.GrpcService;
+import alluxio.grpc.ServiceType;
 import alluxio.heartbeat.HeartbeatContext;
 import alluxio.heartbeat.HeartbeatThread;
+import alluxio.job.JobServerContext;
 import alluxio.metrics.MetricsSystem;
+import alluxio.security.user.ServerUserState;
 import alluxio.underfs.UfsManager;
 import alluxio.util.ThreadFactoryUtils;
 import alluxio.wire.WorkerNetAddress;
 import alluxio.worker.job.JobMasterClient;
-import alluxio.worker.job.JobMasterClientConfig;
+import alluxio.worker.job.JobMasterClientContext;
 import alluxio.worker.job.command.CommandHandlingExecutor;
 import alluxio.worker.job.task.TaskExecutorManager;
 
 import com.google.common.base.Throwables;
-import com.google.common.collect.Maps;
-import org.apache.thrift.TProcessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -49,26 +55,25 @@ import javax.annotation.concurrent.NotThreadSafe;
 public final class JobWorker extends AbstractWorker {
   private static final Logger LOG = LoggerFactory.getLogger(JobWorker.class);
 
+  private final JobServerContext mJobServerContext;
   /** Client for job master communication. */
   private final JobMasterClient mJobMasterClient;
   /** The manager for the all the local task execution. */
-  private final TaskExecutorManager mTaskExecutorManager;
+  private TaskExecutorManager mTaskExecutorManager;
   /** The service that handles commands sent from master. */
   private Future<?> mCommandHandlingService;
-  /** The manager for all ufs. */
-  private UfsManager mUfsManager;
 
   /**
    * Creates a new instance of {@link JobWorker}.
    *
    * @param ufsManager the ufs manager
    */
-  JobWorker(UfsManager ufsManager) {
+  JobWorker(FileSystem filesystem, FileSystemContext fsContext, UfsManager ufsManager) {
     super(
         Executors.newFixedThreadPool(1, ThreadFactoryUtils.build("job-worker-heartbeat-%d", true)));
-    mUfsManager = ufsManager;
-    mJobMasterClient = JobMasterClient.Factory.create(JobMasterClientConfig.defaults());
-    mTaskExecutorManager = new TaskExecutorManager();
+    mJobServerContext = new JobServerContext(filesystem, fsContext, ufsManager);
+    mJobMasterClient = JobMasterClient.Factory.create(JobMasterClientContext
+        .newBuilder(ClientContext.create(ServerConfiguration.global())).build());
   }
 
   @Override
@@ -82,14 +87,14 @@ public final class JobWorker extends AbstractWorker {
   }
 
   @Override
-  public Map<String, TProcessor> getServices() {
-    return Maps.newHashMap();
+  public Map<ServiceType, GrpcService> getServices() {
+    return Collections.emptyMap();
   }
 
   @Override
   public void start(WorkerNetAddress address) throws IOException {
     // Start serving metrics system, this will not block
-    MetricsSystem.startSinks();
+    MetricsSystem.startSinks(ServerConfiguration.get(PropertyKey.METRICS_CONF_FILE));
 
     try {
       JobWorkerIdRegistry.registerWorker(mJobMasterClient, address);
@@ -98,11 +103,15 @@ public final class JobWorker extends AbstractWorker {
       throw Throwables.propagate(e);
     }
 
+    mTaskExecutorManager = new TaskExecutorManager(
+        ServerConfiguration.getInt(PropertyKey.JOB_WORKER_THREADPOOL_SIZE), address);
+
     mCommandHandlingService = getExecutorService().submit(
         new HeartbeatThread(HeartbeatContext.JOB_WORKER_COMMAND_HANDLING,
-            new CommandHandlingExecutor(mTaskExecutorManager, mUfsManager, mJobMasterClient,
+            new CommandHandlingExecutor(mJobServerContext, mTaskExecutorManager, mJobMasterClient,
                 address),
-            Configuration.getInt(PropertyKey.JOB_MASTER_WORKER_HEARTBEAT_INTERVAL_MS)));
+            (int) ServerConfiguration.getMs(PropertyKey.JOB_MASTER_WORKER_HEARTBEAT_INTERVAL),
+            ServerConfiguration.global(), ServerUserState.global()));
   }
 
   @Override

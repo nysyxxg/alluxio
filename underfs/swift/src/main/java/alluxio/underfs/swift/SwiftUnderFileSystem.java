@@ -13,9 +13,10 @@ package alluxio.underfs.swift;
 
 import alluxio.AlluxioURI;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.FileDoesNotExistException;
+import alluxio.retry.RetryPolicy;
 import alluxio.underfs.ObjectUnderFileSystem;
 import alluxio.underfs.UnderFileSystem;
 import alluxio.underfs.UnderFileSystemConfiguration;
@@ -110,9 +111,7 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
       config.setMock(true);
       config.setMockAllowEveryone(true);
     } else {
-      if (conf.isSet(PropertyKey.SWIFT_API_KEY)) {
-        config.setPassword(conf.get(PropertyKey.SWIFT_API_KEY));
-      } else if (conf.isSet(PropertyKey.SWIFT_PASSWORD_KEY)) {
+      if (conf.isSet(PropertyKey.SWIFT_PASSWORD_KEY)) {
         config.setPassword(conf.get(PropertyKey.SWIFT_PASSWORD_KEY));
       }
       config.setAuthUrl(conf.get(PropertyKey.SWIFT_AUTH_URL_KEY));
@@ -218,7 +217,7 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
         LOG.error("Source path {} does not exist", source);
         return false;
       } catch (Exception e) {
-        LOG.error("Failed to copy file {} to {}", source, destination, e.getMessage());
+        LOG.error("Failed to copy file {} to {}", source, destination, e);
         if (i != NUM_RETRIES - 1) {
           LOG.error("Retrying copying file {} to {}", source, destination);
         }
@@ -229,7 +228,7 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
   }
 
   @Override
-  protected boolean createEmptyObject(String key) {
+  public boolean createEmptyObject(String key) {
     try {
       Container container = mAccount.getContainer(mContainerName);
       StoredObject object = container.getObject(key);
@@ -244,7 +243,8 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
   @Override
   protected OutputStream createObject(String key) throws IOException {
     if (mSimulationMode) {
-      return new SwiftMockOutputStream(mAccount, mContainerName, key);
+      return new SwiftMockOutputStream(mAccount, mContainerName, key,
+          mUfsConf.getList(PropertyKey.TMP_DIRS, ","));
     }
 
     return SwiftDirectClient.put(mAccess,
@@ -278,7 +278,8 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
     String prefix = PathUtils.normalizePath(key, PATH_SEPARATOR);
     // In case key is root (empty string) do not normalize prefix
     prefix = prefix.equals(PATH_SEPARATOR) ? "" : prefix;
-    PaginationMap paginationMap = container.getPaginationMap(prefix, getListingChunkLength());
+    PaginationMap paginationMap = container.getPaginationMap(prefix,
+        getListingChunkLength(mUfsConf));
     if (paginationMap != null && paginationMap.getNumberOfPages() > 0) {
       return new SwiftObjectListingChunk(paginationMap, 0, recursive);
     }
@@ -363,7 +364,9 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
   }
 
   @Override
-  protected InputStream openObject(String key, OpenOptions options) throws IOException {
-    return new SwiftInputStream(mAccount, mContainerName, key, options.getOffset());
+  protected InputStream openObject(String key, OpenOptions options, RetryPolicy retryPolicy)
+      throws IOException {
+    return new SwiftInputStream(mAccount, mContainerName, key, options.getOffset(), retryPolicy,
+        mUfsConf.getBytes(PropertyKey.UNDERFS_OBJECT_STORE_MULTI_RANGE_CHUNK_SIZE));
   }
 }

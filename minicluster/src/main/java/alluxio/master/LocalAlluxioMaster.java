@@ -12,11 +12,12 @@
 package alluxio.master;
 
 import alluxio.AlluxioTestDirectory;
-import alluxio.Configuration;
 import alluxio.Constants;
-import alluxio.PropertyKey;
 import alluxio.client.file.FileSystem;
 import alluxio.client.file.FileSystemContext;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.master.journal.JournalType;
 import alluxio.util.io.FileUtils;
 import alluxio.util.network.NetworkAddressUtils;
 import alluxio.util.network.NetworkAddressUtils.ServiceType;
@@ -50,47 +51,54 @@ public final class LocalAlluxioMaster {
 
   private final ClientPool mClientPool = new ClientPool(mClientSupplier);
 
-  private MasterProcess mMasterProcess;
+  private final boolean mIncludeSecondary;
+
+  private AlluxioMasterProcess mMasterProcess;
   private Thread mMasterThread;
 
   private AlluxioSecondaryMaster mSecondaryMaster;
   private Thread mSecondaryMasterThread;
 
-  private LocalAlluxioMaster() throws IOException {
-    mHostname = NetworkAddressUtils.getConnectHost(ServiceType.MASTER_RPC);
-    mJournalFolder = Configuration.get(PropertyKey.MASTER_JOURNAL_FOLDER);
+  private LocalAlluxioMaster(boolean includeSecondary) {
+    mHostname = NetworkAddressUtils.getConnectHost(ServiceType.MASTER_RPC,
+        ServerConfiguration.global());
+    mJournalFolder = ServerConfiguration.get(PropertyKey.MASTER_JOURNAL_FOLDER);
+    mIncludeSecondary = includeSecondary;
   }
 
   /**
    * Creates a new local Alluxio master with an isolated work directory and port.
    *
+   * @param includeSecondary whether to start a secondary master alongside the regular master
    * @return an instance of Alluxio master
    */
-  public static LocalAlluxioMaster create() throws IOException {
+  public static LocalAlluxioMaster create(boolean includeSecondary) throws IOException {
     String workDirectory = uniquePath();
     FileUtils.deletePathRecursively(workDirectory);
-    Configuration.set(PropertyKey.WORK_DIR, workDirectory);
-    return create(workDirectory);
+    ServerConfiguration.set(PropertyKey.WORK_DIR, workDirectory);
+    return create(workDirectory, includeSecondary);
   }
 
   /**
    * Creates a new local Alluxio master with a isolated port.
    *
    * @param workDirectory Alluxio work directory, this method will create it if it doesn't exist yet
+   * @param includeSecondary whether to start a secondary master alongside the regular master
    * @return the created Alluxio master
    */
-  public static LocalAlluxioMaster create(final String workDirectory) throws IOException {
+  public static LocalAlluxioMaster create(String workDirectory, boolean includeSecondary)
+      throws IOException {
     if (!Files.isDirectory(Paths.get(workDirectory))) {
       Files.createDirectory(Paths.get(workDirectory));
     }
-    return new LocalAlluxioMaster();
+    return new LocalAlluxioMaster(includeSecondary);
   }
 
   /**
    * Starts the master.
    */
   public void start() {
-    mMasterProcess = MasterProcess.Factory.create();
+    mMasterProcess = AlluxioMasterProcess.Factory.create();
     Runnable runMaster = new Runnable() {
       @Override
       public void run() {
@@ -110,6 +118,14 @@ public final class LocalAlluxioMaster {
     mMasterThread.setName("MasterThread-" + System.identityHashCode(mMasterThread));
     mMasterThread.start();
     TestUtils.waitForReady(mMasterProcess);
+    // Don't start a secondary master when using the Raft journal.
+    if (ServerConfiguration.getEnum(PropertyKey.MASTER_JOURNAL_TYPE,
+        JournalType.class) == JournalType.EMBEDDED) {
+      return;
+    }
+    if (!mIncludeSecondary) {
+      return;
+    }
     mSecondaryMaster = new AlluxioSecondaryMaster();
     Runnable runSecondaryMaster = new Runnable() {
       @Override
@@ -148,7 +164,6 @@ public final class LocalAlluxioMaster {
       mSecondaryMaster.stop();
       while (mSecondaryMasterThread.isAlive()) {
         LOG.info("Stopping thread {}.", mSecondaryMasterThread.getName());
-        mSecondaryMasterThread.interrupt();
         mSecondaryMasterThread.join(1000);
       }
       mSecondaryMasterThread = null;
@@ -184,7 +199,7 @@ public final class LocalAlluxioMaster {
   /**
    * @return the internal {@link MasterProcess}
    */
-  public MasterProcess getMasterProcess() {
+  public AlluxioMasterProcess getMasterProcess() {
     return mMasterProcess;
   }
 

@@ -16,12 +16,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import alluxio.AlluxioURI;
+import alluxio.conf.ServerConfiguration;
 import alluxio.exception.AccessControlException;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.FileAlreadyExistsException;
 import alluxio.exception.InvalidPathException;
+import alluxio.grpc.MountPOptions;
+import alluxio.master.file.contexts.MountContext;
 import alluxio.master.file.meta.options.MountInfo;
-import alluxio.master.file.options.MountOptions;
 import alluxio.master.journal.NoopJournalContext;
 import alluxio.underfs.UfsManager;
 import alluxio.underfs.UfsManager.UfsClient;
@@ -42,10 +44,9 @@ import java.util.Map;
  */
 public final class MountTableTest {
   private MountTable mMountTable;
-  private final MountOptions mDefaultOptions = MountOptions.defaults();
-  private final UnderFileSystem mTestUfs =
-      new LocalUnderFileSystemFactory().create("/", UnderFileSystemConfiguration.defaults());
   private static final String ROOT_UFS = "s3a://bucket/";
+  private final UnderFileSystem mTestUfs = new LocalUnderFileSystemFactory().create("/",
+      UnderFileSystemConfiguration.defaults(ServerConfiguration.global()));
 
   @Before
   public void before() throws Exception {
@@ -53,8 +54,9 @@ public final class MountTableTest {
     UfsClient ufsClient =
         new UfsManager.UfsClient(() -> mTestUfs, AlluxioURI.EMPTY_URI);
     when(ufsManager.get(anyLong())).thenReturn(ufsClient);
-    mMountTable = new MountTable(ufsManager, new MountInfo(new AlluxioURI(MountTable.ROOT),
-        new AlluxioURI(ROOT_UFS), IdUtils.ROOT_MOUNT_ID, MountOptions.defaults()));
+    mMountTable = new MountTable(ufsManager,
+        new MountInfo(new AlluxioURI(MountTable.ROOT), new AlluxioURI(ROOT_UFS),
+            IdUtils.ROOT_MOUNT_ID, MountContext.defaults().getOptions().build()));
   }
 
   /**
@@ -110,18 +112,18 @@ public final class MountTableTest {
 
     // Test reverseResolve()
     Assert.assertEquals(new AlluxioURI("/mnt/foo"),
-        mMountTable.reverseResolve(new AlluxioURI("/foo")));
+        mMountTable.reverseResolve(new AlluxioURI("/foo")).getUri());
     Assert.assertEquals(new AlluxioURI("/mnt/foo/x"),
-        mMountTable.reverseResolve(new AlluxioURI("/foo/x")));
-    Assert.assertEquals(mMountTable.reverseResolve(new AlluxioURI("/bar")),
+        mMountTable.reverseResolve(new AlluxioURI("/foo/x")).getUri());
+    Assert.assertEquals(mMountTable.reverseResolve(new AlluxioURI("/bar")).getUri(),
         new AlluxioURI("/mnt/bar"));
-    Assert.assertEquals(mMountTable.reverseResolve(new AlluxioURI("/bar/y")),
+    Assert.assertEquals(mMountTable.reverseResolve(new AlluxioURI("/bar/y")).getUri(),
         new AlluxioURI("/mnt/bar/y"));
     // Test reverseResolve(), ufs path is not mounted
     Assert.assertEquals(new AlluxioURI("/foobar"),
-        mMountTable.reverseResolve(new AlluxioURI("s3a://bucket/foobar")));
+        mMountTable.reverseResolve(new AlluxioURI("s3a://bucket/foobar")).getUri());
     Assert.assertEquals(new AlluxioURI("/"),
-        mMountTable.reverseResolve(new AlluxioURI("s3a://bucket/")));
+        mMountTable.reverseResolve(new AlluxioURI("s3a://bucket/")).getUri());
     Assert.assertNull(mMountTable.reverseResolve(new AlluxioURI("/foobar")));
 
     // Test getMountPoint()
@@ -212,6 +214,15 @@ public final class MountTableTest {
     Assert.assertTrue(mMountTable.isMountPoint(new AlluxioURI("/mnt/bar")));
     Assert.assertTrue(mMountTable.isMountPoint(new AlluxioURI("/mnt/bar/baz")));
 
+    // Test containsMountPoint()
+    Assert.assertTrue(mMountTable.containsMountPoint(new AlluxioURI("/mnt/bar"), false));
+    Assert.assertTrue(mMountTable.containsMountPoint(new AlluxioURI("/mnt/bar/baz"), false));
+    Assert.assertFalse(mMountTable.containsMountPoint(new AlluxioURI("/mnt/bar/baz/bay"), false));
+    Assert.assertFalse(mMountTable.containsMountPoint(new AlluxioURI("/mnt/foo"), false));
+    Assert.assertTrue(mMountTable.containsMountPoint(new AlluxioURI("/mnt/foo"), true));
+    Assert.assertTrue(mMountTable.containsMountPoint(new AlluxioURI("/"), true));
+    Assert.assertFalse(mMountTable.containsMountPoint(new AlluxioURI("/bogus"), true));
+
     // Test delete()
     Assert.assertFalse(deleteMount("/mnt/bar/baz"));
     Assert.assertTrue(deleteMount("/mnt/bar/baz/bay"));
@@ -293,7 +304,8 @@ public final class MountTableTest {
    */
   @Test
   public void readOnlyMount() throws Exception {
-    MountOptions options = MountOptions.defaults().setReadOnly(true);
+    MountPOptions options =
+        MountContext.mergeFrom(MountPOptions.newBuilder().setReadOnly(true)).getOptions().build();
     String mountPath = "/mnt/foo";
     AlluxioURI alluxioUri = new AlluxioURI("alluxio://localhost:1234" + mountPath);
     mMountTable.add(NoopJournalContext.INSTANCE, alluxioUri,
@@ -352,10 +364,10 @@ public final class MountTableTest {
     Map<String, MountInfo> mountTable = new HashMap<>(2);
     mountTable.put("/mnt/foo",
         new MountInfo(new AlluxioURI("/mnt/foo"), new AlluxioURI("hdfs://localhost:5678/foo"), 2L,
-            MountOptions.defaults()));
+            MountContext.defaults().getOptions().build()));
     mountTable.put("/mnt/bar",
         new MountInfo(new AlluxioURI("/mnt/bar"), new AlluxioURI("hdfs://localhost:5678/bar"), 3L,
-            MountOptions.defaults()));
+            MountContext.defaults().getOptions().build()));
 
     AlluxioURI masterAddr = new AlluxioURI("alluxio://localhost:1234");
     for (Map.Entry<String, MountInfo> mountPoint : mountTable.entrySet()) {
@@ -365,7 +377,7 @@ public final class MountTableTest {
     }
     // Add root mountpoint
     mountTable.put("/", new MountInfo(new AlluxioURI("/"), new AlluxioURI("s3a://bucket/"),
-        IdUtils.ROOT_MOUNT_ID, MountOptions.defaults()));
+        IdUtils.ROOT_MOUNT_ID, MountContext.defaults().getOptions().build()));
     Assert.assertEquals(mountTable, mMountTable.getMountTable());
   }
 
@@ -376,10 +388,10 @@ public final class MountTableTest {
   public void getMountInfo() throws Exception {
     MountInfo info1 =
         new MountInfo(new AlluxioURI("/mnt/foo"), new AlluxioURI("hdfs://localhost:5678/foo"), 2L,
-            MountOptions.defaults());
+            MountContext.defaults().getOptions().build());
     MountInfo info2 =
         new MountInfo(new AlluxioURI("/mnt/bar"), new AlluxioURI("hdfs://localhost:5678/bar"), 3L,
-            MountOptions.defaults());
+            MountContext.defaults().getOptions().build());
     addMount("/mnt/foo", "hdfs://localhost:5678/foo", 2);
     addMount("/mnt/bar", "hdfs://localhost:5678/bar", 3);
     Assert.assertEquals(info1, mMountTable.getMountInfo(info1.getMountId()));
@@ -389,10 +401,10 @@ public final class MountTableTest {
 
   private void addMount(String alluxio, String ufs, long id) throws Exception {
     mMountTable.add(NoopJournalContext.INSTANCE, new AlluxioURI(alluxio), new AlluxioURI(ufs), id,
-        mDefaultOptions);
+            MountContext.defaults().getOptions().build());
   }
 
   private boolean deleteMount(String path) {
-    return mMountTable.delete(NoopJournalContext.INSTANCE, new AlluxioURI(path));
+    return mMountTable.delete(NoopJournalContext.INSTANCE, new AlluxioURI(path), true);
   }
 }

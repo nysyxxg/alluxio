@@ -12,9 +12,12 @@
 package alluxio.common;
 
 import alluxio.HealthCheckClient;
-import alluxio.exception.ConnectionFailedException;
-import alluxio.exception.status.UnauthenticatedException;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.exception.status.AlluxioStatusException;
+import alluxio.exception.status.UnavailableException;
+import alluxio.grpc.ServiceType;
 import alluxio.retry.RetryPolicy;
+import alluxio.security.user.UserState;
 import alluxio.util.network.NetworkAddressUtils;
 
 import org.slf4j.Logger;
@@ -30,22 +33,28 @@ public class RpcPortHealthCheckClient implements HealthCheckClient {
   private static final Logger LOG = LoggerFactory.getLogger(RpcPortHealthCheckClient.class);
 
   private final InetSocketAddress mNodeAddress;
-  private final String mServiceName;
+  private final ServiceType mServiceType;
   private final Supplier<RetryPolicy> mRetryPolicySupplier;
+  private final AlluxioConfiguration mConf;
+  private final UserState mUserState;
 
   /**
    * Creates a worker health check client.
    *
    * @param nodeAddress The potential node address
-   * @param serviceName The service name for node
+   * @param serviceType The type of service
    * @param retryPolicySupplier the retry policy supplier
+   * @param alluxioConf Alluxio configuration
    */
   public RpcPortHealthCheckClient(InetSocketAddress nodeAddress,
-      String serviceName,
-      Supplier<RetryPolicy> retryPolicySupplier) {
+      ServiceType serviceType,
+      Supplier<RetryPolicy> retryPolicySupplier,
+      AlluxioConfiguration alluxioConf) {
     mNodeAddress = nodeAddress;
-    mServiceName = serviceName;
+    mServiceType = serviceType;
     mRetryPolicySupplier = retryPolicySupplier;
+    mConf = alluxioConf;
+    mUserState = UserState.Factory.create(mConf);
   }
 
   @Override
@@ -54,12 +63,12 @@ public class RpcPortHealthCheckClient implements HealthCheckClient {
     while (retry.attempt()) {
       try {
         LOG.debug("Checking whether {} is listening for RPCs", mNodeAddress);
-        NetworkAddressUtils.pingService(mNodeAddress, mServiceName);
+        NetworkAddressUtils.pingService(mNodeAddress, mServiceType, mConf, mUserState);
         LOG.debug("Successfully connected to {}", mNodeAddress);
         return true;
-      } catch (ConnectionFailedException e) {
+      } catch (UnavailableException e) {
         LOG.debug("Failed to connect to {}", mNodeAddress);
-      } catch (UnauthenticatedException e) {
+      } catch (AlluxioStatusException e) {
         throw new RuntimeException(e);
       }
     }

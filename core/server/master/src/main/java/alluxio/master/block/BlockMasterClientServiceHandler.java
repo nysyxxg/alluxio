@@ -11,46 +11,40 @@
 
 package alluxio.master.block;
 
-import alluxio.Constants;
 import alluxio.RpcUtils;
-import alluxio.RpcUtils.RpcCallable;
-import alluxio.RpcUtils.RpcCallableThrowsIOException;
 import alluxio.client.block.options.GetWorkerReportOptions;
-import alluxio.thrift.AlluxioTException;
-import alluxio.thrift.BlockMasterClientService;
-import alluxio.thrift.BlockMasterInfo;
-import alluxio.thrift.BlockMasterInfoField;
-import alluxio.thrift.GetBlockInfoTOptions;
-import alluxio.thrift.GetBlockInfoTResponse;
-import alluxio.thrift.GetBlockMasterInfoTOptions;
-import alluxio.thrift.GetBlockMasterInfoTResponse;
-import alluxio.thrift.GetCapacityBytesTOptions;
-import alluxio.thrift.GetCapacityBytesTResponse;
-import alluxio.thrift.GetServiceVersionTOptions;
-import alluxio.thrift.GetServiceVersionTResponse;
-import alluxio.thrift.GetUsedBytesTOptions;
-import alluxio.thrift.GetUsedBytesTResponse;
-import alluxio.thrift.GetWorkerInfoListTOptions;
-import alluxio.thrift.GetWorkerInfoListTResponse;
-import alluxio.thrift.GetWorkerReportTOptions;
-import alluxio.thrift.WorkerInfo;
+import alluxio.grpc.BlockMasterClientServiceGrpc;
+import alluxio.grpc.BlockMasterInfo;
+import alluxio.grpc.BlockMasterInfoField;
+import alluxio.grpc.GetBlockInfoPOptions;
+import alluxio.grpc.GetBlockInfoPRequest;
+import alluxio.grpc.GetBlockInfoPResponse;
+import alluxio.grpc.GetBlockMasterInfoPOptions;
+import alluxio.grpc.GetBlockMasterInfoPResponse;
+import alluxio.grpc.GetCapacityBytesPOptions;
+import alluxio.grpc.GetCapacityBytesPResponse;
+import alluxio.grpc.GetUsedBytesPOptions;
+import alluxio.grpc.GetUsedBytesPResponse;
+import alluxio.grpc.GetWorkerInfoListPOptions;
+import alluxio.grpc.GetWorkerInfoListPResponse;
+import alluxio.grpc.GetWorkerLostStoragePOptions;
+import alluxio.grpc.GetWorkerLostStoragePResponse;
+import alluxio.grpc.GetWorkerReportPOptions;
+import alluxio.grpc.GrpcUtils;
 
 import com.google.common.base.Preconditions;
-import org.apache.thrift.TException;
+import io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
-
-import javax.annotation.concurrent.NotThreadSafe;
+import java.util.stream.Collectors;
 
 /**
- * This class is a Thrift handler for block master RPCs invoked by an Alluxio client.
+ * This class is a gRPC handler for block master RPCs invoked by an Alluxio client.
  */
-@NotThreadSafe // TODO(jiri): make thread-safe (c.f. ALLUXIO-1664)
-public final class BlockMasterClientServiceHandler implements BlockMasterClientService.Iface {
+public final class BlockMasterClientServiceHandler
+    extends BlockMasterClientServiceGrpc.BlockMasterClientServiceImplBase {
   private static final Logger LOG = LoggerFactory.getLogger(BlockMasterClientServiceHandler.class);
 
   private final BlockMaster mBlockMaster;
@@ -60,98 +54,103 @@ public final class BlockMasterClientServiceHandler implements BlockMasterClientS
    *
    * @param blockMaster the {@link BlockMaster} the handler uses internally
    */
-  BlockMasterClientServiceHandler(BlockMaster blockMaster) {
+  public BlockMasterClientServiceHandler(BlockMaster blockMaster) {
     Preconditions.checkNotNull(blockMaster, "blockMaster");
     mBlockMaster = blockMaster;
   }
 
   @Override
-  public GetServiceVersionTResponse getServiceVersion(GetServiceVersionTOptions options) {
-    return new GetServiceVersionTResponse(Constants.BLOCK_MASTER_CLIENT_SERVICE_VERSION);
+  public void getBlockInfo(GetBlockInfoPRequest request,
+      StreamObserver<GetBlockInfoPResponse> responseObserver) {
+    long blockId = request.getBlockId();
+    GetBlockInfoPOptions options = request.getOptions();
+    RpcUtils.call(LOG,
+        () -> GetBlockInfoPResponse.newBuilder()
+            .setBlockInfo(GrpcUtils.toProto(mBlockMaster.getBlockInfo(blockId))).build(),
+        "GetBlockInfo", "blockId=%s, options=%s", responseObserver, blockId, options);
   }
 
   @Override
-  public GetCapacityBytesTResponse getCapacityBytes(GetCapacityBytesTOptions options)
-      throws AlluxioTException {
-    return RpcUtils.call(LOG, (RpcCallable<GetCapacityBytesTResponse>) () ->
-        new GetCapacityBytesTResponse(mBlockMaster.getCapacityBytes()),
-        "GetCapacityBytes", "options=%s", options);
-  }
-
-  @Override
-  public GetUsedBytesTResponse getUsedBytes(GetUsedBytesTOptions options) throws AlluxioTException {
-    return RpcUtils.call(LOG, (RpcCallable<GetUsedBytesTResponse>) () -> new GetUsedBytesTResponse(
-        mBlockMaster.getUsedBytes()), "GetUsedBytes", "options=%s", options);
-  }
-
-  @Override
-  public GetBlockInfoTResponse getBlockInfo(final long blockId, GetBlockInfoTOptions options)
-      throws AlluxioTException {
-    return RpcUtils.call(LOG,
-        (RpcCallableThrowsIOException<GetBlockInfoTResponse>) () -> new GetBlockInfoTResponse(
-            mBlockMaster.getBlockInfo(blockId).toThrift()), "GetBlockInfo",
-        "blockId=%s, options=%s", blockId, options);
-  }
-
-  @Override
-  public GetBlockMasterInfoTResponse getBlockMasterInfo(final GetBlockMasterInfoTOptions options)
-      throws TException {
-    return RpcUtils.call((RpcUtils.RpcCallable<GetBlockMasterInfoTResponse>) () -> {
-      BlockMasterInfo info = new alluxio.thrift.BlockMasterInfo();
-      for (BlockMasterInfoField field : options.getFilter() != null ? options.getFilter()
+  public void getBlockMasterInfo(GetBlockMasterInfoPOptions options,
+      StreamObserver<GetBlockMasterInfoPResponse> responseObserver) {
+    RpcUtils.call(LOG, () -> {
+      BlockMasterInfo.Builder infoBuilder = BlockMasterInfo.newBuilder();
+      for (BlockMasterInfoField field : (options.getFiltersCount() != 0)
+          ? options.getFiltersList()
           : Arrays.asList(BlockMasterInfoField.values())) {
         switch (field) {
           case CAPACITY_BYTES:
-            info.setCapacityBytes(mBlockMaster.getCapacityBytes());
+            infoBuilder.setCapacityBytes(mBlockMaster.getCapacityBytes());
             break;
           case CAPACITY_BYTES_ON_TIERS:
-            info.setCapacityBytesOnTiers(mBlockMaster.getTotalBytesOnTiers());
+            infoBuilder.putAllCapacityBytesOnTiers(mBlockMaster.getTotalBytesOnTiers());
             break;
           case FREE_BYTES:
-            info.setFreeBytes(mBlockMaster.getCapacityBytes() - mBlockMaster.getUsedBytes());
+            infoBuilder.setFreeBytes(mBlockMaster.getCapacityBytes() - mBlockMaster.getUsedBytes());
             break;
           case LIVE_WORKER_NUM:
-            info.setLiveWorkerNum(mBlockMaster.getWorkerCount());
+            infoBuilder.setLiveWorkerNum(mBlockMaster.getWorkerCount());
             break;
           case LOST_WORKER_NUM:
-            info.setLostWorkerNum(mBlockMaster.getLostWorkerCount());
+            infoBuilder.setLostWorkerNum(mBlockMaster.getLostWorkerCount());
             break;
           case USED_BYTES:
-            info.setUsedBytes(mBlockMaster.getUsedBytes());
+            infoBuilder.setUsedBytes(mBlockMaster.getUsedBytes());
             break;
           case USED_BYTES_ON_TIERS:
-            info.setUsedBytesOnTiers(mBlockMaster.getUsedBytesOnTiers());
+            infoBuilder.putAllUsedBytesOnTiers(mBlockMaster.getUsedBytesOnTiers());
             break;
           default:
             LOG.warn("Unrecognized block master info field: " + field);
         }
       }
-      return new GetBlockMasterInfoTResponse(info);
-    });
+      return GetBlockMasterInfoPResponse.newBuilder().setBlockMasterInfo(infoBuilder).build();
+    }, "GetBlockMasterInfo", "options=%s", responseObserver, options);
   }
 
   @Override
-  public GetWorkerInfoListTResponse getWorkerInfoList(GetWorkerInfoListTOptions options)
-      throws AlluxioTException {
-    return RpcUtils.call((RpcCallableThrowsIOException<GetWorkerInfoListTResponse>) () -> {
-      List<WorkerInfo> workerInfos = new ArrayList<>();
-      for (alluxio.wire.WorkerInfo workerInfo : mBlockMaster.getWorkerInfoList()) {
-        workerInfos.add(workerInfo.toThrift());
-      }
-      return new GetWorkerInfoListTResponse(workerInfos);
-    });
+  public void getCapacityBytes(GetCapacityBytesPOptions options,
+      StreamObserver<GetCapacityBytesPResponse> responseObserver) {
+    RpcUtils.call(LOG,
+        () -> GetCapacityBytesPResponse.newBuilder()
+            .setBytes(mBlockMaster.getCapacityBytes()).build(),
+        "GetCapacityBytes", "options=%s", responseObserver, options);
   }
 
   @Override
-  public GetWorkerInfoListTResponse getWorkerReport(GetWorkerReportTOptions options)
-      throws AlluxioTException {
-    return RpcUtils.call(LOG, (RpcCallableThrowsIOException<GetWorkerInfoListTResponse>) () -> {
-      List<WorkerInfo> workerInfos = new ArrayList<>();
-      for (alluxio.wire.WorkerInfo workerInfo : mBlockMaster
-          .getWorkerReport(new GetWorkerReportOptions(options))) {
-        workerInfos.add(workerInfo.toThrift());
-      }
-      return new GetWorkerInfoListTResponse(workerInfos);
-    }, "GetWorkerReport", "options=%s", options);
+  public void getUsedBytes(GetUsedBytesPOptions options,
+      StreamObserver<GetUsedBytesPResponse> responseObserver) {
+    RpcUtils.call(LOG,
+        () -> GetUsedBytesPResponse.newBuilder().setBytes(mBlockMaster.getUsedBytes()).build(),
+        "GetUsedBytes", "options=%s", responseObserver, options);
+  }
+
+  @Override
+  public void getWorkerInfoList(GetWorkerInfoListPOptions options,
+      StreamObserver<GetWorkerInfoListPResponse> responseObserver) {
+    RpcUtils.call(LOG,
+        () -> GetWorkerInfoListPResponse.newBuilder()
+            .addAllWorkerInfos(mBlockMaster.getWorkerInfoList().stream().map(GrpcUtils::toProto)
+            .collect(Collectors.toList())).build(),
+        "GetWorkerInfoList", "options=%s", responseObserver, options);
+  }
+
+  @Override
+  public void getWorkerReport(GetWorkerReportPOptions options,
+      StreamObserver<GetWorkerInfoListPResponse> responseObserver) {
+    RpcUtils.call(LOG,
+        () -> GetWorkerInfoListPResponse.newBuilder()
+            .addAllWorkerInfos(mBlockMaster.getWorkerReport(new GetWorkerReportOptions(options))
+                .stream().map(GrpcUtils::toProto).collect(Collectors.toList())).build(),
+        "GetWorkerReport", "options=%s", responseObserver, options);
+  }
+
+  @Override
+  public void getWorkerLostStorage(GetWorkerLostStoragePOptions options,
+      StreamObserver<GetWorkerLostStoragePResponse> responseObserver) {
+    RpcUtils.call(LOG,
+        () -> GetWorkerLostStoragePResponse.newBuilder()
+            .addAllWorkerLostStorageInfo(mBlockMaster.getWorkerLostStorage()).build(),
+        "GetWorkerLostStorage", "options=%s", responseObserver, options);
   }
 }

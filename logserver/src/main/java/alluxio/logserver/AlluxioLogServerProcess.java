@@ -11,9 +11,9 @@
 
 package alluxio.logserver;
 
-import alluxio.Configuration;
+import alluxio.conf.ServerConfiguration;
 import alluxio.Process;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
 import alluxio.util.CommonUtils;
 import alluxio.util.WaitForOptions;
 
@@ -67,10 +67,10 @@ public class AlluxioLogServerProcess implements Process {
    * @param baseLogsDir base directory to store the logs pushed from remote Alluxio servers
    */
   public AlluxioLogServerProcess(String baseLogsDir) {
-    mPort = Configuration.getInt(PropertyKey.LOGSERVER_PORT);
+    mPort = ServerConfiguration.getInt(PropertyKey.LOGSERVER_PORT);
     // The log server serves the logging requests from Alluxio servers.
-    mMinNumberOfThreads = Configuration.getInt(PropertyKey.LOGSERVER_THREADS_MIN);
-    mMaxNumberOfThreads = Configuration.getInt(PropertyKey.LOGSERVER_THREADS_MAX);
+    mMinNumberOfThreads = ServerConfiguration.getInt(PropertyKey.LOGSERVER_THREADS_MIN);
+    mMaxNumberOfThreads = ServerConfiguration.getInt(PropertyKey.LOGSERVER_THREADS_MAX);
     mBaseLogsDir = baseLogsDir;
     mStopped = true;
   }
@@ -147,7 +147,7 @@ public class AlluxioLogServerProcess implements Process {
       try {
         mServerSocket.close();
       } catch (IOException e) {
-        LOG.warn("Exception in closing server socket: {}", e);
+        LOG.warn("Exception in closing server socket: {}", e.toString());
       }
     }
     mThreadPool.shutdownNow();
@@ -159,7 +159,7 @@ public class AlluxioLogServerProcess implements Process {
         try {
           socket.close();
         } catch (IOException e) {
-          LOG.warn("Exception in closing client socket: {}", e);
+          LOG.warn("Exception in closing client socket: {}", e.toString());
         }
       }
     }

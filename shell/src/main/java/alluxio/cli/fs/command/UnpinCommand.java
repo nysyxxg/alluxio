@@ -12,14 +12,16 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
 
 import org.apache.commons.cli.CommandLine;
 
 import java.io.IOException;
+import java.util.Collections;
 
 import javax.annotation.concurrent.ThreadSafe;
 
@@ -28,13 +30,14 @@ import javax.annotation.concurrent.ThreadSafe;
  * are never evicted from memory, so this method will allow such files to be evicted.
  */
 @ThreadSafe
+@PublicApi
 public final class UnpinCommand extends AbstractFileSystemCommand {
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public UnpinCommand(FileSystem fs) {
-    super(fs);
+  public UnpinCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -45,7 +48,7 @@ public final class UnpinCommand extends AbstractFileSystemCommand {
   @Override
   protected void runPlainPath(AlluxioURI path, CommandLine cl)
       throws AlluxioException, IOException {
-    FileSystemCommandUtils.setPinned(mFileSystem, path, false);
+    FileSystemCommandUtils.setPinned(mFileSystem, path, false, Collections.emptyList());
     System.out.println("File '" + path + "' was successfully unpinned.");
   }
 

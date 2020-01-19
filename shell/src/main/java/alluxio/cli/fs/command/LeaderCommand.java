@@ -11,8 +11,8 @@
 
 package alluxio.cli.fs.command;
 
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
 import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.FileSystemMasterClient;
 import alluxio.exception.status.InvalidArgumentException;
@@ -27,20 +27,20 @@ import org.apache.commons.cli.CommandLine;
 import java.net.InetSocketAddress;
 import java.util.Arrays;
 import java.util.List;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
  * Prints the current leader master host name.
  */
 @ThreadSafe
+@PublicApi
 public final class LeaderCommand extends AbstractFileSystemCommand {
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public LeaderCommand(FileSystem fs) {
-    super(fs);
+  public LeaderCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -56,14 +56,14 @@ public final class LeaderCommand extends AbstractFileSystemCommand {
   @Override
   public int run(CommandLine cl) {
     try (CloseableResource<FileSystemMasterClient> client =
-        FileSystemContext.get().acquireMasterClientResource()) {
+        mFsContext.acquireMasterClientResource()) {
       try {
         InetSocketAddress address = client.get().getAddress();
         System.out.println(address.getHostName());
 
         List<InetSocketAddress> addresses = Arrays.asList(address);
         MasterInquireClient inquireClient = new PollingMasterInquireClient(addresses, () ->
-                new ExponentialBackoffRetry(50, 100, 2)
+                new ExponentialBackoffRetry(50, 100, 2), mFsContext.getClusterConf()
         );
         try {
           inquireClient.getPrimaryRpcAddress();

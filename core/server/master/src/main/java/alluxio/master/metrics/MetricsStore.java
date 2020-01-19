@@ -13,9 +13,11 @@ package alluxio.master.metrics;
 
 import alluxio.collections.IndexDefinition;
 import alluxio.collections.IndexedSet;
+import alluxio.grpc.MetricType;
 import alluxio.metrics.Metric;
 import alluxio.metrics.MetricsSystem;
 import alluxio.metrics.MetricsSystem.InstanceType;
+import alluxio.resource.LockResource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,7 +25,9 @@ import org.slf4j.LoggerFactory;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -71,8 +75,16 @@ public class MetricsStore {
     return str;
   }
 
+  // The lock to guarantee that only one thread is clearing the metrics
+  // and no other interaction with worker/client metrics set is allowed during metrics clearing
+  private final ReentrantReadWriteLock mLock = new ReentrantReadWriteLock();
+
+  // Although IndexedSet is threadsafe, it lacks an update operation, so we need locking to
+  // implement atomic update using remove + add.
+  @GuardedBy("mLock")
   private final IndexedSet<Metric> mWorkerMetrics =
       new IndexedSet<>(FULL_NAME_INDEX, NAME_INDEX, ID_INDEX);
+  @GuardedBy("mLock")
   private final IndexedSet<Metric> mClientMetrics =
       new IndexedSet<>(FULL_NAME_INDEX, NAME_INDEX, ID_INDEX);
 
@@ -83,16 +95,13 @@ public class MetricsStore {
    * @param hostname the hostname of the instance
    * @param metrics the new worker metrics
    */
-  public synchronized void putWorkerMetrics(String hostname, List<Metric> metrics) {
+  public void putWorkerMetrics(String hostname, List<Metric> metrics) {
     if (metrics.isEmpty()) {
       return;
     }
-    mWorkerMetrics.removeByField(ID_INDEX, getFullInstanceId(hostname, null));
-    for (Metric metric : metrics) {
-      if (metric.getHostname() == null) {
-        continue; // ignore metrics whose hostname is null
-      }
-      mWorkerMetrics.add(metric);
+    try (LockResource r = new LockResource(mLock.readLock())) {
+      putReportedMetrics(mWorkerMetrics,
+          getFullInstanceId(hostname, null), metrics);
     }
   }
 
@@ -104,17 +113,47 @@ public class MetricsStore {
    * @param clientId the id of the client
    * @param metrics the new metrics
    */
-  public synchronized void putClientMetrics(String hostname, String clientId,
-      List<Metric> metrics) {
+  public void putClientMetrics(String hostname, String clientId, List<Metric> metrics) {
     if (metrics.isEmpty()) {
       return;
     }
-    mClientMetrics.removeByField(ID_INDEX, getFullInstanceId(hostname, clientId));
-    for (Metric metric : metrics) {
+    try (LockResource r = new LockResource(mLock.readLock())) {
+      putReportedMetrics(mClientMetrics, getFullInstanceId(hostname, clientId), metrics);
+    }
+  }
+
+  /**
+   * Update the reported metrics with the given instanceId and set of metrics received from a
+   * worker or client.
+   *
+   * Any metrics from the given instanceId which are not reported in the new set of metrics are
+   * removed. Metrics of {@link MetricType} COUNTER are incremented by the reported values.
+   * Otherwise, all metrics are simply replaced.
+   *
+   * @param metricSet the {@link IndexedSet} of client or worker metrics to update
+   * @param instanceId the instance id, derived from {@link #getFullInstanceId(String, String)}
+   * @param reportedMetrics the metrics received by the RPC handler
+   */
+  private static void putReportedMetrics(IndexedSet<Metric> metricSet, String instanceId,
+      List<Metric> reportedMetrics) {
+    for (Metric metric : reportedMetrics) {
       if (metric.getHostname() == null) {
         continue; // ignore metrics whose hostname is null
       }
-      mClientMetrics.add(metric);
+
+      // If a metric is COUNTER, the value sent via RPC should be the incremental value; i.e.
+      // the amount the value has changed since the last RPC. The master should equivalently
+      // increment its value based on the received metric rather than replacing it.
+      if (!metricSet.add(metric)) {
+        Metric oldMetric = metricSet.getFirstByField(FULL_NAME_INDEX, metric.getFullMetricName());
+        if (metric.getMetricType() == MetricType.COUNTER) {
+          if (metric.getValue() != 0L) {
+            oldMetric.addValue(metric.getValue());
+          }
+        } else {
+          oldMetric.setValue(metric.getValue());
+        }
+      }
     }
   }
 
@@ -126,22 +165,19 @@ public class MetricsStore {
    * @param name the metric name
    * @return the set of matched metrics
    */
-  public Set<Metric> getMetricsByInstanceTypeAndName(MetricsSystem.InstanceType instanceType,
-      String name) {
-    if (instanceType == InstanceType.MASTER) {
-      return getMasterMetrics(name);
-    }
-
-    if (instanceType == InstanceType.WORKER) {
-      synchronized (mWorkerMetrics) {
+  public Set<Metric> getMetricsByInstanceTypeAndName(
+      MetricsSystem.InstanceType instanceType, String name) {
+    try (LockResource r = new LockResource(mLock.readLock())) {
+      if (instanceType == InstanceType.MASTER) {
+        return getMasterMetrics(name);
+      }
+      if (instanceType == InstanceType.WORKER) {
         return mWorkerMetrics.getByField(NAME_INDEX, name);
-      }
-    } else if (instanceType == InstanceType.CLIENT) {
-      synchronized (mWorkerMetrics) {
+      } else if (instanceType == InstanceType.CLIENT) {
         return mClientMetrics.getByField(NAME_INDEX, name);
+      } else {
+        throw new IllegalArgumentException("Unsupported instance type " + instanceType);
       }
-    } else {
-      throw new IllegalArgumentException("Unsupported instance type " + instanceType);
     }
   }
 
@@ -157,9 +193,17 @@ public class MetricsStore {
 
   /**
    * Clears all the metrics.
+   *
+   * This method should only be called when starting the {@link DefaultMetricsMaster}
+   * and before starting the metrics updater to avoid conflicts with
+   * other methods in this class which updates or accesses
+   * the metrics inside metrics sets.
    */
-  public synchronized void clear() {
-    mWorkerMetrics.clear();
-    mClientMetrics.clear();
+  public void clear() {
+    try (LockResource r = new LockResource(mLock.writeLock())) {
+      mWorkerMetrics.clear();
+      mClientMetrics.clear();
+      MetricsSystem.resetAllMetrics();
+    }
   }
 }

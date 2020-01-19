@@ -12,12 +12,12 @@
 package alluxio.client.cli.job;
 
 import alluxio.AlluxioURI;
-import alluxio.client.WriteType;
 import alluxio.client.cli.fs.AbstractFileSystemShellTest;
 import alluxio.client.file.FileOutStream;
 import alluxio.client.file.URIStatus;
-import alluxio.client.file.options.CreateFileOptions;
-import alluxio.job.persist.PersistConfig;
+import alluxio.grpc.CreateFilePOptions;
+import alluxio.grpc.WritePType;
+import alluxio.job.plan.persist.PersistConfig;
 import alluxio.job.util.JobTestUtils;
 import alluxio.job.wire.JobInfo;
 import alluxio.job.wire.Status;
@@ -25,18 +25,23 @@ import alluxio.job.wire.Status;
 import java.util.concurrent.TimeoutException;
 
 public abstract class JobShellTest extends AbstractFileSystemShellTest {
+
   protected long runPersistJob() throws Exception {
+    return runPersistJob("/test");
+  }
+
+  protected long runPersistJob(String pathStr) throws Exception {
     // write a file in alluxio only
-    AlluxioURI filePath = new AlluxioURI("/test");
+    AlluxioURI filePath = new AlluxioURI(pathStr);
     FileOutStream os = mFileSystem.createFile(filePath,
-        CreateFileOptions.defaults().setWriteType(WriteType.MUST_CACHE));
+        CreateFilePOptions.newBuilder().setWriteType(WritePType.MUST_CACHE).build());
     os.write((byte) 0);
     os.write((byte) 1);
     os.close();
 
     // persist the file
     URIStatus status = mFileSystem.getStatus(filePath);
-    return mJobMaster.run(new PersistConfig("/test", 1, true, status.getUfsPath()));
+    return mJobMaster.run(new PersistConfig(pathStr, 1, true, status.getUfsPath()));
   }
 
   protected JobInfo waitForJobToFinish(final long jobId)

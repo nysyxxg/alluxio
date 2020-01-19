@@ -12,7 +12,7 @@
 package alluxio;
 
 import alluxio.exception.status.UnavailableException;
-import alluxio.master.MasterClientConfig;
+import alluxio.master.MasterClientContext;
 import alluxio.master.MasterInquireClient;
 import alluxio.retry.RetryPolicy;
 
@@ -29,31 +29,42 @@ public abstract class AbstractMasterClient extends AbstractClient {
   /** Client for determining the master RPC address. */
   private final MasterInquireClient mMasterInquireClient;
 
+  /** Client for determining configuration RPC address,
+   * which may be different from target address. */
+  private final MasterInquireClient mConfMasterInquireClient;
+
   /**
    * Creates a new master client base.
    *
-   * @param conf master client configuration
+   * @param clientConf master client configuration
    */
-  public AbstractMasterClient(MasterClientConfig conf) {
-    super(conf.getSubject(), null);
-    mMasterInquireClient = conf.getMasterInquireClient();
+  public AbstractMasterClient(MasterClientContext clientConf) {
+    super(clientConf, null);
+    mMasterInquireClient = clientConf.getMasterInquireClient();
+    mConfMasterInquireClient = clientConf.getConfMasterInquireClient();
   }
 
   /**
    * Creates a new master client base.
    *
-   * @param conf master client configuration
+   * @param clientConf master client configuration
    * @param address address to connect to
    * @param retryPolicySupplier retry policy to use
    */
-  public AbstractMasterClient(MasterClientConfig conf, InetSocketAddress address,
+  public AbstractMasterClient(MasterClientContext clientConf, InetSocketAddress address,
       Supplier<RetryPolicy> retryPolicySupplier) {
-    super(conf.getSubject(), address, retryPolicySupplier);
-    mMasterInquireClient = conf.getMasterInquireClient();
+    super(clientConf, address, retryPolicySupplier);
+    mMasterInquireClient = clientConf.getMasterInquireClient();
+    mConfMasterInquireClient = clientConf.getConfMasterInquireClient();
   }
 
   @Override
   public synchronized InetSocketAddress getAddress() throws UnavailableException {
     return mMasterInquireClient.getPrimaryRpcAddress();
+  }
+
+  @Override
+  public synchronized InetSocketAddress getConfAddress() throws UnavailableException {
+    return mConfMasterInquireClient.getPrimaryRpcAddress();
   }
 }

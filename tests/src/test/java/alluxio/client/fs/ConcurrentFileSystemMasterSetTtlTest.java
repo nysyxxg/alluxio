@@ -14,12 +14,15 @@ package alluxio.client.fs;
 import alluxio.AlluxioURI;
 import alluxio.AuthenticatedUserRule;
 import alluxio.Constants;
-import alluxio.PropertyKey;
-import alluxio.client.WriteType;
+import alluxio.conf.PropertyKey;
 import alluxio.client.file.FileSystem;
-import alluxio.client.file.options.CreateFileOptions;
-import alluxio.client.file.options.SetAttributeOptions;
 import alluxio.collections.ConcurrentHashSet;
+import alluxio.conf.ServerConfiguration;
+import alluxio.grpc.CreateFilePOptions;
+import alluxio.grpc.FileSystemMasterCommonPOptions;
+import alluxio.grpc.SetAttributePOptions;
+import alluxio.grpc.TtlAction;
+import alluxio.grpc.WritePType;
 import alluxio.heartbeat.HeartbeatContext;
 import alluxio.heartbeat.HeartbeatScheduler;
 import alluxio.heartbeat.ManuallyScheduleHeartbeat;
@@ -28,7 +31,6 @@ import alluxio.security.authentication.AuthenticatedClientUser;
 import alluxio.testutils.BaseIntegrationTest;
 import alluxio.testutils.LocalAlluxioClusterResource;
 import alluxio.util.CommonUtils;
-import alluxio.wire.TtlAction;
 
 import com.google.common.base.Joiner;
 import org.junit.Assert;
@@ -67,7 +69,8 @@ public class ConcurrentFileSystemMasterSetTtlTest extends BaseIntegrationTest {
   private FileSystem mFileSystem;
 
   @Rule
-  public AuthenticatedUserRule mAuthenticatedUser = new AuthenticatedUserRule(TEST_USER);
+  public AuthenticatedUserRule mAuthenticatedUser = new AuthenticatedUserRule(TEST_USER,
+      ServerConfiguration.global());
 
   @ClassRule
   public static ManuallyScheduleHeartbeat sManuallySchedule =
@@ -75,13 +78,21 @@ public class ConcurrentFileSystemMasterSetTtlTest extends BaseIntegrationTest {
 
   @Rule
   public LocalAlluxioClusterResource mLocalAlluxioClusterResource =
-      new LocalAlluxioClusterResource.Builder().setProperty(PropertyKey
-          .USER_FILE_MASTER_CLIENT_THREADS, CONCURRENCY_FACTOR)
-          .setProperty(PropertyKey.MASTER_TTL_CHECKER_INTERVAL_MS, TTL_INTERVAL_MS).build();
+      new LocalAlluxioClusterResource.Builder()
+          .setProperty(PropertyKey.MASTER_TTL_CHECKER_INTERVAL_MS, TTL_INTERVAL_MS)
+          .setProperty(PropertyKey.USER_FILE_MASTER_CLIENT_POOL_SIZE_MAX, CONCURRENCY_FACTOR)
+          .setProperty(PropertyKey.USER_BLOCK_MASTER_CLIENT_POOL_SIZE_MAX, CONCURRENCY_FACTOR)
+          /**
+           * This is to make sure master executor has enough thread to being with. Otherwise, delay
+           * on master ForkJoinPool's internal thread count adjustment might take several seconds.
+           * This can interfere with this test's timing expectations.
+           */
+          .setProperty(PropertyKey.MASTER_RPC_EXECUTOR_CORE_POOL_SIZE, CONCURRENCY_FACTOR)
+          .build();
 
   @Before
   public void before() {
-    mFileSystem = FileSystem.Factory.get();
+    mFileSystem = FileSystem.Factory.create(ServerConfiguration.global());
   }
 
   @Test
@@ -93,8 +104,10 @@ public class ConcurrentFileSystemMasterSetTtlTest extends BaseIntegrationTest {
 
     for (int i = 0; i < numThreads; i++) {
       files[i] = new AlluxioURI("/file" + i);
-      mFileSystem.createFile(files[i],
-          CreateFileOptions.defaults().setWriteType(WriteType.MUST_CACHE)).close();
+      mFileSystem
+          .createFile(files[i],
+              CreateFilePOptions.newBuilder().setWriteType(WritePType.MUST_CACHE).build())
+          .close();
       ttls[i] = random.nextInt(2 * TTL_INTERVAL_MS);
     }
 
@@ -128,8 +141,10 @@ public class ConcurrentFileSystemMasterSetTtlTest extends BaseIntegrationTest {
           try {
             AuthenticatedClientUser.set(TEST_USER);
             barrier.await();
-            mFileSystem.setAttribute(paths[iteration], SetAttributeOptions.defaults()
-                .setTtl(ttls[iteration]).setTtlAction(TtlAction.DELETE));
+            mFileSystem.setAttribute(paths[iteration], SetAttributePOptions.newBuilder()
+                .setCommonOptions(FileSystemMasterCommonPOptions.newBuilder()
+                    .setTtl(ttls[iteration]).setTtlAction(TtlAction.DELETE))
+                .build());
           } catch (Exception e) {
             throw new RuntimeException(e);
           }

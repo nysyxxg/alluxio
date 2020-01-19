@@ -12,13 +12,14 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
 import alluxio.cli.fs.FileSystemShellUtils;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
+import alluxio.grpc.TtlAction;
 import alluxio.util.CommonUtils;
-import alluxio.wire.TtlAction;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Option;
@@ -33,6 +34,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * args.
  */
 @ThreadSafe
+@PublicApi
 public final class SetTtlCommand extends AbstractFileSystemCommand {
 
   private static final String TTL_ACTION = "action";
@@ -49,10 +51,10 @@ public final class SetTtlCommand extends AbstractFileSystemCommand {
   private long mTtlMs;
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public SetTtlCommand(FileSystem fs) {
-    super(fs);
+  public SetTtlCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override

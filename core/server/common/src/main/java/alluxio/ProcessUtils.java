@@ -11,6 +11,9 @@
 
 package alluxio;
 
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,7 +28,7 @@ public final class ProcessUtils {
    * Runs the given {@link Process}. This method should only be called from {@code main()} methods.
    *
    * @param process the {@link Process} to run
-'   */
+   */
   public static void run(Process process) {
     try {
       LOG.info("Starting {}.", process);
@@ -33,12 +36,15 @@ public final class ProcessUtils {
       LOG.info("Stopping {}.", process);
       System.exit(0);
     } catch (Throwable t) {
-      LOG.error("Uncaught exception while running {}, stopping it and exiting.", process, t);
+      LOG.error("Uncaught exception while running {}, stopping it and exiting. "
+          + "Exception \"{}\", Root Cause \"{}\"", process, t, ExceptionUtils.getRootCause(t), t);
       try {
         process.stop();
       } catch (Throwable t2) {
         // continue to exit
-        LOG.error("Uncaught exception while stopping {}, simply exiting.", process, t2);
+        LOG.error("Uncaught exception while stopping {}, simply exiting. "
+            + "Exception \"{}\", Root Cause \"{}\"", process, t2, ExceptionUtils.getRootCause(t2),
+            t2);
       }
       System.exit(-1);
     }
@@ -68,7 +74,7 @@ public final class ProcessUtils {
     if (t != null) {
       message += "\n" + ExceptionUtils.getStackTrace(t);
     }
-    if (Configuration.getBoolean(PropertyKey.TEST_MODE)) {
+    if (ServerConfiguration.getBoolean(PropertyKey.TEST_MODE)) {
       throw new RuntimeException(message);
     }
     logger.error(message);

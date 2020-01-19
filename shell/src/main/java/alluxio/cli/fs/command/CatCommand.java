@@ -12,11 +12,12 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.Constants;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
 import alluxio.client.file.FileInStream;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.URIStatus;
-import alluxio.client.file.options.OpenFileOptions;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.FileDoesNotExistException;
@@ -32,13 +33,13 @@ import javax.annotation.concurrent.ThreadSafe;
  * Prints the file's contents to the console.
  */
 @ThreadSafe
+@PublicApi
 public final class CatCommand extends AbstractFileSystemCommand {
-
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public CatCommand(FileSystem fs) {
-    super(fs);
+  public CatCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -54,9 +55,8 @@ public final class CatCommand extends AbstractFileSystemCommand {
     if (status.isFolder()) {
       throw new FileDoesNotExistException(ExceptionMessage.PATH_MUST_BE_FILE.getMessage(path));
     }
-    OpenFileOptions options = OpenFileOptions.defaults();
-    byte[] buf = new byte[512];
-    try (FileInStream is = mFileSystem.openFile(path, options)) {
+    byte[] buf = new byte[Constants.MB];
+    try (FileInStream is = mFileSystem.openFile(path)) {
       int read = is.read(buf);
       while (read != -1) {
         System.out.write(buf, 0, read);

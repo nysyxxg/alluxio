@@ -15,7 +15,7 @@
   <parent>
     <artifactId>alluxio-core-server</artifactId>
     <groupId>org.alluxio</groupId>
-    <version>2.0.0-SNAPSHOT</version>
+    <version>2.2.0-SNAPSHOT</version>
   </parent>
   <artifactId>alluxio-core-server-worker</artifactId>
   <packaging>jar</packaging>
@@ -35,10 +35,6 @@
       <artifactId>guava</artifactId>
     </dependency>
     <dependency>
-      <groupId>com.qmino</groupId>
-      <artifactId>miredot-annotations</artifactId>
-    </dependency>
-    <dependency>
       <groupId>commons-lang</groupId>
       <artifactId>commons-lang</artifactId>
     </dependency>
@@ -49,10 +45,6 @@
     <dependency>
       <groupId>io.dropwizard.metrics</groupId>
       <artifactId>metrics-core</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.netty</groupId>
-      <artifactId>netty-all</artifactId>
     </dependency>
     <dependency>
       <groupId>javax.ws.rs</groupId>
@@ -67,20 +59,12 @@
       <artifactId>commons-lang3</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.apache.thrift</groupId>
-      <artifactId>libthrift</artifactId>
-    </dependency>
-    <dependency>
       <groupId>org.eclipse.jetty</groupId>
       <artifactId>jetty-server</artifactId>
     </dependency>
     <dependency>
       <groupId>org.eclipse.jetty</groupId>
       <artifactId>jetty-servlet</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.eclipse.jetty</groupId>
-      <artifactId>jetty-webapp</artifactId>
     </dependency>
     <dependency>
       <groupId>org.glassfish.jersey.containers</groupId>
@@ -104,7 +88,7 @@
     </dependency>
     <dependency>
       <groupId>org.alluxio</groupId>
-      <artifactId>alluxio-core-protobuf</artifactId>
+      <artifactId>alluxio-core-transport</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>
@@ -116,7 +100,7 @@
     <!-- External test dependencies -->
     <dependency>
       <groupId>org.hamcrest</groupId>
-      <artifactId>hamcrest-core</artifactId>
+      <artifactId>hamcrest</artifactId>
       <scope>test</scope>
     </dependency>
 
@@ -141,13 +125,29 @@
     <plugins>
       <!-- REST API documentation -->
       <plugin>
-        <groupId>com.qmino</groupId>
-        <artifactId>miredot-plugin</artifactId>
+        <inherited>false</inherited>
+        <groupId>com.github.kongchen</groupId>
+        <artifactId>swagger-maven-plugin</artifactId>
         <configuration>
-          <!-- This following license only works for groupId org.alluxio and artifactId alluxio-core-server-worker -->
-          <license>
-            cHJvamVjdHxvcmcuYWxsdXhpby5hbGx1eGlvLWNvcmUtc2VydmVyLXdvcmtlcnwyMDE5LTAzLTMxfHRydWV8LTEjTUN3Q0ZHdEUzWjV6TlhPdkY2SXM3c3BWK3hGekhCZ0dBaFF6am5MdWJhSVNLRFBmSXhEV0FiN1V0VFd2U1E9PQ==
-          </license>
+          <apiSources>
+            <apiSource>
+              <springmvc>false</springmvc>
+              <schemes>http</schemes>
+              <host>[Alluxio Worker Hostname]</host>
+              <basePath>/api/v1</basePath>
+              <info>
+                <version>v1</version>
+                <title>Alluxio Worker REST API Documentation</title>
+                <description>
+                  The Alluxio Workers are processes which provide clients access to the data exposed by the Alluxio System.
+                </description>
+              </info>
+              <locations>alluxio.worker.AlluxioWorkerRestServiceHandler</locations>
+              <templatePath>${project.parent.parent.parent.basedir}/templates/strapdown.html.hbs</templatePath>
+              <outputPath>${project.parent.parent.parent.basedir}/generated/worker/index.html</outputPath>
+              <swaggerDirectory>${project.parent.parent.parent.basedir}/generated/worker/swagger-ui</swaggerDirectory>
+            </apiSource>
+          </apiSources>
         </configuration>
       </plugin>
     </plugins>

@@ -11,17 +11,20 @@
 
 package alluxio.master;
 
-import alluxio.Configuration;
 import alluxio.Constants;
 import alluxio.ProcessUtils;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
 import alluxio.master.PrimarySelector.State;
 import alluxio.master.journal.JournalSystem;
+import alluxio.metrics.MasterMetrics;
+import alluxio.metrics.MetricsSystem;
 import alluxio.util.CommonUtils;
 import alluxio.util.ThreadUtils;
 import alluxio.util.WaitForOptions;
 import alluxio.util.interfaces.Scoped;
 
+import com.codahale.metrics.Timer;
 import com.google.common.base.Preconditions;
 import org.apache.commons.lang.exception.ExceptionUtils;
 import org.slf4j.Logger;
@@ -42,10 +45,13 @@ final class FaultTolerantAlluxioMasterProcess extends AlluxioMasterProcess {
       LoggerFactory.getLogger(FaultTolerantAlluxioMasterProcess.class);
 
   private final long mServingThreadTimeoutMs =
-      Configuration.getMs(PropertyKey.MASTER_SERVING_THREAD_TIMEOUT);
+      ServerConfiguration.getMs(PropertyKey.MASTER_SERVING_THREAD_TIMEOUT);
 
   private PrimarySelector mLeaderSelector;
   private Thread mServingThread;
+
+  /** An indicator for whether the process is running (after start() and before stop()). */
+  private volatile boolean mRunning;
 
   /**
    * Creates a {@link FaultTolerantAlluxioMasterProcess}.
@@ -60,10 +66,12 @@ final class FaultTolerantAlluxioMasterProcess extends AlluxioMasterProcess {
     }
     mLeaderSelector = Preconditions.checkNotNull(leaderSelector, "leaderSelector");
     mServingThread = null;
+    mRunning = false;
   }
 
   @Override
   public void start() throws Exception {
+    mRunning = true;
     mJournalSystem.start();
     try {
       mLeaderSelector.start(getRpcAddress());
@@ -76,8 +84,14 @@ final class FaultTolerantAlluxioMasterProcess extends AlluxioMasterProcess {
     LOG.info("Secondary started");
     while (!Thread.interrupted()) {
       mLeaderSelector.waitForState(State.PRIMARY);
+      if (!mRunning) {
+        break;
+      }
       if (gainPrimacy()) {
         mLeaderSelector.waitForState(State.SECONDARY);
+        if (!mRunning) {
+          break;
+        }
         losePrimacy();
       }
     }
@@ -100,7 +114,10 @@ final class FaultTolerantAlluxioMasterProcess extends AlluxioMasterProcess {
       }
       stopMasters();
       LOG.info("Secondary stopped");
-      mJournalSystem.gainPrimacy();
+      try (Timer.Context ctx = MetricsSystem
+          .timer(MasterMetrics.JOURNAL_GAIN_PRIMACY_TIMER).time()) {
+        mJournalSystem.gainPrimacy();
+      }
       // We only check unstable here because mJournalSystem.gainPrimacy() is the only slow method
       if (unstable.get()) {
         losePrimacy();
@@ -154,6 +171,7 @@ final class FaultTolerantAlluxioMasterProcess extends AlluxioMasterProcess {
 
   @Override
   public void stop() throws Exception {
+    mRunning = false;
     super.stop();
     if (mLeaderSelector != null) {
       mLeaderSelector.stop();

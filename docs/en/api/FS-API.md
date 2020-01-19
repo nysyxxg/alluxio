@@ -7,15 +7,18 @@ priority: 0
 ---
 
 Applications primarily interact with Alluxio through its Filesystem API. Java users
-can either use the [Alluxio Java Client](#Java-Client), or the
-[Hadoop-Compatible Java Client](#Hadoop-Compatible-Java-Client), which
+can either use the [Alluxio Java Client](#java-client), or the
+[Hadoop-Compatible Java Client](#hadoop-compatible-java-client), which
 wraps the Alluxio Java Client to implement the Hadoop API.
 
-By setting up an Alluxio Proxy, users can also interact with Alluxio through a REST
-API similar to the Filesystem API. The REST API currently has language bindings for
-Go and Python.
+Alluxio also provides a [POSIX API]({{ '/en/api/POSIX-API.html' | relativize_url }}) after mounting
+Alluxio as a local FUSE volume.
 
-A third option is to interact with Alluxio through its S3 API. Users can interact
+By setting up an Alluxio Proxy, users can also interact with Alluxio through a REST
+API similar to the Filesystem API. The REST API is currently used for the Go and Python language
+bindings.
+
+A fourth option is to interact with Alluxio through its S3 API. Users can interact
 using the same S3 clients used for AWS S3 operations. This makes it easy to change
 existing S3 workloads to use Alluxio.
 
@@ -31,10 +34,12 @@ compatible API. The Alluxio API provides additional functionality, while the Had
 gives users the flexibility of leveraging Alluxio without having to modify existing code written
 using Hadoop's API.
 
+### Alluxio Java API
+
 All resources with the Alluxio Java API are specified through a `AlluxioURI` which represents the
 path to the resource.
 
-### Getting a Filesystem Client
+#### Getting a Filesystem Client
 
 To obtain an Alluxio filesystem client in Java code, use:
 
@@ -42,7 +47,7 @@ To obtain an Alluxio filesystem client in Java code, use:
 FileSystem fs = FileSystem.Factory.get();
 ```
 
-### Creating a File
+#### Creating a File
 
 All metadata operations as well as opening a file for reading or creating a file for writing are
 executed through the FileSystem object. Since Alluxio files are immutable once written, the
@@ -60,7 +65,7 @@ out.write(...);
 out.close();
 ```
 
-### Specifying Operation Options
+#### Specifying Operation Options
 
 For all FileSystem operations, an additional `options` field may be specified, which allows
 users to specify non-default settings for the operation. For example:
@@ -68,12 +73,42 @@ users to specify non-default settings for the operation. For example:
 ```java
 FileSystem fs = FileSystem.Factory.get();
 AlluxioURI path = new AlluxioURI("/myFile");
-// Generate options to set a custom blocksize of 128 MB
-CreateFileOptions options = CreateFileOptions.defaults().setBlockSize(128 * Constants.MB);
+// Generate options to set a custom blocksize of 64 MB
+CreateFilePOptions options = CreateFilePOptions.newBuilder().setBlockSizeBytes(64 * Constants.MB).build();
 FileOutStream out = fs.createFile(path, options);
 ```
 
-### IO Options
+#### Programmatically Modifying Configuration
+
+Alluxio configuration can be set through `alluxio-site.properties`, but these properties apply to
+all instances of Alluxio that read from the file. If fine-grained configuration management is
+required, pass in a customized configuration object when creating the `FileSystem` object.
+The generated `FileSystem` object will have modified configuration properties, independent of any
+other `FileSystem` clients.
+
+```java
+FileSystem normalFs = FileSystem.Factory.get();
+AlluxioURI normalPath = new AlluxioURI("/normalFile");
+// Create a file with default properties
+FileOutStream normalOut = normalFs.createFile(normalPath);
+...
+normalOut.close();
+
+// Create a file system with custom configuration
+InstancedConfiguration conf = InstancedConfiguration.defaults();
+conf.set(PropertyKey.SECURITY_LOGIN_USERNAME, "alice");
+FileSystem customizedFs = FileSystem.Factory.create(conf);
+AlluxioURI normalPath = new AlluxioURI("/customizedFile");
+// The newly created file will be created under the username "alice"
+FileOutStream customizedOut = customizedFs.createFile(customizedPath);
+...
+customizedOut.close();
+
+// normalFs can still be used as a FileSystem client with the default username.
+// Likewise, using customizedFs will use the username "alice".
+```
+
+#### IO Options
 
 Alluxio uses two different storage types: Alluxio managed storage and under storage. Alluxio managed
 storage is the memory, SSD, and/or HDD allocated to Alluxio workers. Under storage is the storage
@@ -109,56 +144,56 @@ Below is a table of the expected behaviors of `WriteType`
 {% endfor %}
 </table>
 
-### Location policy
+#### Location policy
 
 Alluxio provides location policy to choose which workers to store the blocks of a file.
 
-Using Alluxio's Java API, users can set the policy in `CreateFileOptions` for writing files and
-`OpenFileOptions` for reading files into Alluxio.
+Using Alluxio's Java API, users can set the policy in `CreateFilePOptions` for writing files and
+`OpenFilePOptions` for reading files into Alluxio.
 
 Users can override the default policy class in the
-[configuration file]({{ '/en/basic/Configuration-Settings.html' | relativize_url }}) at property
-`alluxio.user.file.write.location.policy.class`. The built-in policies include:
+[configuration file]({{ '/en/operation/Configuration.html' | relativize_url }}) at property
+`alluxio.user.block.write.location.policy.class`. The built-in policies include:
 
-* **LocalFirstPolicy (alluxio.client.file.policy.LocalFirstPolicy)**
+* **LocalFirstPolicy (alluxio.client.block.policy.LocalFirstPolicy)**
 
     Returns the local worker first, and if it does not have enough capacity of a block,
     randomly picks a worker from the active workers list. This is the default policy.
 
-* **MostAvailableFirstPolicy (alluxio.client.file.policy.MostAvailableFirstPolicy)**
+* **MostAvailableFirstPolicy (alluxio.client.block.policy.MostAvailableFirstPolicy)**
 
     Returns the worker with the most available bytes.
 
-* **RoundRobinPolicy (alluxio.client.file.policy.RoundRobinPolicy)**
+* **RoundRobinPolicy (alluxio.client.block.policy.RoundRobinPolicy)**
 
     Chooses the worker for the next block in a round-robin manner and skips workers that do not have
     enough capacity.
 
-* **SpecificHostPolicy (alluxio.client.file.policy.SpecificHostPolicy)**
+* **SpecificHostPolicy (alluxio.client.block.policy.SpecificHostPolicy)**
 
     Returns a worker with the specified host name. This policy cannot be set as default policy.
 
 Alluxio supports custom policies, so you can also develop your own policy appropriate for your
-workload by implementing interface `alluxio.client.file.policy.FileWriteLocationPolicy`. Note that a
-default policy must have an empty constructor. And to use `ASYNC_THROUGH` write type, all the blocks
-of a file must be written to the same worker.
+workload by implementing the interface `alluxio.client.block.policy.BlockLocationPolicy`. Note that a
+default policy must have a constructor which takes `alluxio.conf.AlluxioConfiguration`.
+To use `ASYNC_THROUGH` write type, all the blocks of a file must be written to the same worker.
 
-### Write Tier
+#### Write Tier
 
 Alluxio allows a client to select a tier preference when writing blocks to a local worker. Currently
 this policy preference exists only for local workers, not remote workers; remote workers will write
 blocks to the highest tier.
 
 By default, data is written to the top tier. Users can modify the default setting through the
-`alluxio.user.file.write.tier.default` [configuration]({{ '/en/basic/Configuration-Settings.html' | relativize_url }})
+`alluxio.user.file.write.tier.default` [configuration]({{ '/en/operation/Configuration.html' | relativize_url }})
 property or override it through an option to the `FileSystem#createFile(AlluxioURI)` API call.
 
-### Accessing an existing file in Alluxio
+#### Accessing an existing file in Alluxio
 
 All operations on existing files or directories require the user to specify the `AlluxioURI`.
 With the AlluxioURI, the user may use any of the methods of `FileSystem` to access the resource.
 
-### Reading Data
+#### Reading Data
 
 A `AlluxioURI` can be used to perform Alluxio FileSystem operations, such as modifying the file
 metadata, ie. TTL or pin state, or getting an input stream to read the file.
@@ -176,12 +211,12 @@ in.read(...);
 in.close();
 ```
 
-### Javadoc
+#### Javadoc
 
 For additional API information, please refer to the
-[Alluxio javadocs](http://www.alluxio.org/javadoc/{{site.ALLUXIO_MAJOR_VERSION}}/index.html).
+[Alluxio javadocs](https://docs.alluxio.io/os/javadoc/{{site.ALLUXIO_MAJOR_VERSION}}/proxy/index.html).
 
-## Hadoop-Compatible Java Client
+### Hadoop-Compatible Java Client
 
 Alluxio provides access to data through a filesystem interface. Files in Alluxio offer write-once
 semantics: they become immutable after they have been written in their entirety and cannot be read
@@ -190,7 +225,7 @@ and a Hadoop compatible API. The Alluxio API provides additional functionality, 
 compatible API gives users the flexibility of leveraging Alluxio without having to modify existing
 code written using Hadoop's API.
 
-Alluxio has a wrapper of the [Alluxio client](#Java-Client) which provides the Hadoop
+Alluxio has a wrapper of the [Alluxio client](#java-client) which provides the Hadoop
 compatible `FileSystem` interface. With this client, Hadoop file operations will be translated to
 FileSystem operations. The latest documentation for the `FileSystem` interface may be found
 [here](http://hadoop.apache.org/docs/current/api/org/apache/hadoop/fs/FileSystem.html).
@@ -200,10 +235,10 @@ previous code written for Hadoop.
 
 ## Rest API
 
-For portability with other languages, the [Alluxio API](#Java-Client) is also
+For portability with other languages, the [Alluxio API](#java-client) is also
 accessible via an HTTP proxy in the form of a REST API.
 
-The [REST API documentation](http://www.alluxio.org/restdoc/{{site.ALLUXIO_MAJOR_VERSION}}/proxy/index.html)
+The [REST API documentation](https://docs.alluxio.io/os/restdoc/{{site.ALLUXIO_MAJOR_VERSION}}/proxy/index.html)
 is generated as part of Alluxio build and accessible through
 `${ALLUXIO_HOME}/core/server/proxy/target/miredot/index.html`. The main difference between
 the REST API and the Alluxio Java API is in how streams are represented. While the Alluxio Java API
@@ -221,7 +256,7 @@ worker on each compute node.
 ## Python
 
 Alluxio has a [Python Client](https://github.com/Alluxio/alluxio-py) for interacting with Alluxio through its
-[REST API](#Rest-API). The Python client exposes an API similar to the [Alluxio Java API](#Java-Client).
+[REST API](#rest-api). The Python client exposes an API similar to the [Alluxio Java API](#java-client).
 See the [doc](http://alluxio-py.readthedocs.io) for detailed documentation about all available
 methods. See the [example](https://github.com/Alluxio/alluxio-py/blob/master/example.py) of how to perform basic filesystem
 operations in Alluxio.
@@ -239,7 +274,7 @@ an extra hop. For optimal performance, it is recommended to run the proxy server
 worker on each compute node.
 
 ### Install Python Client Library
-```bash
+```console
 $ pip install alluxio
 ```
 
@@ -341,7 +376,7 @@ if __name__ == '__main__':
 ## Go
 
 Alluxio has a [Go Client](https://github.com/Alluxio/alluxio-go) for interacting with Alluxio through its
-[REST API](#Rest-API). The Go client exposes an API similar to the [Alluxio Java API](#Java-Client).
+[REST API](#rest-api). The Go client exposes an API similar to the [Alluxio Java API](#java-client).
 See the [godoc](http://godoc.org/github.com/Alluxio/alluxio-go) for detailed documentation about all available
 methods. The godoc includes examples of how to download, upload, check existence for, and list status for files in
 Alluxio.
@@ -359,7 +394,7 @@ an extra hop. For optimal performance, it is recommended to run the proxy server
 worker on each compute node.
 
 ### Install Go Client Library
-```bash
+```console
 $ go get -d github.com/Alluxio/alluxio-go
 ```
 

@@ -12,13 +12,14 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
-import alluxio.client.file.options.DeleteOptions;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.FileDoesNotExistException;
 import alluxio.exception.status.InvalidArgumentException;
+import alluxio.grpc.DeletePOptions;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Option;
@@ -32,6 +33,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * Removes the file specified by argv.
  */
 @ThreadSafe
+@PublicApi
 public final class RmCommand extends AbstractFileSystemCommand {
 
   private static final Option RECURSIVE_OPTION =
@@ -58,10 +60,10 @@ public final class RmCommand extends AbstractFileSystemCommand {
           .build();
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public RmCommand(FileSystem fs) {
-    super(fs);
+  public RmCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -89,14 +91,11 @@ public final class RmCommand extends AbstractFileSystemCommand {
       throw new IOException(
           path.getPath() + " is a directory, to remove it, please use \"rm -R <path>\"");
     }
-
-    DeleteOptions options = DeleteOptions.defaults().setRecursive(recursive);
-    if (cl.hasOption(REMOVE_UNCHECKED_OPTION_CHAR)) {
-      options.setUnchecked(true);
-    }
-
     boolean isAlluxioOnly = cl.hasOption(REMOVE_ALLUXIO_ONLY.getLongOpt());
-    options.setAlluxioOnly(isAlluxioOnly);
+    DeletePOptions options =
+        DeletePOptions.newBuilder().setRecursive(recursive).setAlluxioOnly(isAlluxioOnly)
+            .setUnchecked(cl.hasOption(REMOVE_UNCHECKED_OPTION_CHAR)).build();
+
     mFileSystem.delete(path, options);
     if (!isAlluxioOnly) {
       System.out.println(path + " has been removed");

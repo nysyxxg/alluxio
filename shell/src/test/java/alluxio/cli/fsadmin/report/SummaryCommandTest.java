@@ -15,12 +15,15 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import alluxio.cli.fsadmin.report.SummaryCommand;
-import alluxio.client.MetaMasterClient;
+import alluxio.client.meta.MetaMasterClient;
 import alluxio.client.block.BlockMasterClient;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.grpc.MasterInfo;
 import alluxio.util.CommonUtils;
+import alluxio.util.ConfigurationUtils;
 import alluxio.wire.BlockMasterInfo;
-import alluxio.wire.MasterInfo;
 
 import org.hamcrest.collection.IsIterableContainingInOrder;
 import org.junit.After;
@@ -38,6 +41,10 @@ import java.util.List;
 import java.util.Map;
 
 public class SummaryCommandTest {
+
+  private static AlluxioConfiguration sConf =
+      new InstancedConfiguration(ConfigurationUtils.defaults());
+
   private MetaMasterClient mMetaMasterClient;
   private BlockMasterClient mBlockMasterClient;
   private ByteArrayOutputStream mOutputStream;
@@ -48,7 +55,7 @@ public class SummaryCommandTest {
     // Generate random values for MasterInfo and BlockMasterInfo
     // Prepare mock meta master client
     mMetaMasterClient = mock(MetaMasterClient.class);
-    MasterInfo masterInfo = new MasterInfo()
+    MasterInfo masterInfo = MasterInfo.newBuilder()
         .setLeaderMasterAddress("testAddress")
         .setWebPort(1231)
         .setRpcPort(8462)
@@ -56,8 +63,9 @@ public class SummaryCommandTest {
         .setUpTimeMs(12412412312L)
         .setVersion("testVersion")
         .setSafeMode(false)
-        .setZookeeperAddresses(Arrays.asList("[zookeeper_hostname1]:2181",
-            "[zookeeper_hostname2]:2181", "[zookeeper_hostname3]:2181"));
+        .addAllZookeeperAddresses(Arrays.asList("[zookeeper_hostname1]:2181",
+            "[zookeeper_hostname2]:2181", "[zookeeper_hostname3]:2181"))
+        .build();
     when(mMetaMasterClient.getMasterInfo(any())).thenReturn(masterInfo);
 
     // Prepare mock block master client
@@ -94,18 +102,18 @@ public class SummaryCommandTest {
   @Test
   public void summary() throws IOException {
     SummaryCommand summaryCommand = new SummaryCommand(mMetaMasterClient,
-        mBlockMasterClient, mPrintStream);
+        mBlockMasterClient, sConf.get(PropertyKey.USER_DATE_FORMAT_PATTERN), mPrintStream);
     summaryCommand.run();
-    checkIfOutputValid();
+    checkIfOutputValid(sConf.get(PropertyKey.USER_DATE_FORMAT_PATTERN));
   }
 
   /**
    * Checks if the output is expected.
    */
-  private void checkIfOutputValid() {
+  private void checkIfOutputValid(String dateFormatPattern) {
     String output = new String(mOutputStream.toByteArray(), StandardCharsets.UTF_8);
     // Skip checking startTime which relies on system time zone
-    String startTime =  CommonUtils.convertMsToDate(1131242343122L);
+    String startTime =  CommonUtils.convertMsToDate(1131242343122L, dateFormatPattern);
     List<String> expectedOutput = Arrays.asList("Alluxio cluster summary: ",
         "    Master Address: testAddress",
         "    Web Port: 1231",
@@ -131,7 +139,6 @@ public class SummaryCommandTest {
         "        Tier: RAM  Size: 6.10KB",
         "    Free Capacity: 1248.94KB");
     List<String> testOutput = Arrays.asList(output.split("\n"));
-    Assert.assertThat(testOutput,
-        IsIterableContainingInOrder.contains(expectedOutput.toArray()));
+    Assert.assertThat(testOutput, IsIterableContainingInOrder.contains(expectedOutput.toArray()));
   }
 }

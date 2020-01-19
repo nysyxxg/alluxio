@@ -11,12 +11,16 @@
 
 package alluxio.cli.fsadmin.command;
 
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
 import alluxio.cli.fsadmin.FileSystemAdminShellUtils;
 import alluxio.cli.fsadmin.report.CapacityCommand;
+import alluxio.cli.fsadmin.report.JobServiceMetricsCommand;
 import alluxio.cli.fsadmin.report.MetricsCommand;
 import alluxio.cli.fsadmin.report.SummaryCommand;
 import alluxio.cli.fsadmin.report.UfsCommand;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.exception.status.InvalidArgumentException;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -29,6 +33,7 @@ import java.io.IOException;
 /**
  * Reports Alluxio running cluster information.
  */
+@PublicApi
 public final class ReportCommand extends AbstractFsAdminCommand {
   public static final String HELP_OPTION_NAME = "h";
   public static final String LIVE_OPTION_NAME = "live";
@@ -67,14 +72,19 @@ public final class ReportCommand extends AbstractFsAdminCommand {
     CAPACITY, // Report worker capacity information
     METRICS, // Report metrics information
     SUMMARY, // Report cluster summary
-    UFS // Report under filesystem information
+    UFS, // Report under filesystem information
+    JOBSERVICE // Report job service metrics information
   }
+
+  private AlluxioConfiguration mConf;
 
   /**
    * @param context fsadmin command context
+   * @param alluxioConf Alluxio configuration
    */
-  public ReportCommand(Context context) {
+  public ReportCommand(Context context, AlluxioConfiguration alluxioConf) {
     super(context);
+    mConf = alluxioConf;
   }
 
   @Override
@@ -94,7 +104,7 @@ public final class ReportCommand extends AbstractFsAdminCommand {
       return 0;
     }
 
-    FileSystemAdminShellUtils.checkMasterClientService();
+    FileSystemAdminShellUtils.checkMasterClientService(mConf);
 
     // Get the report category
     Command command = Command.SUMMARY;
@@ -111,6 +121,9 @@ public final class ReportCommand extends AbstractFsAdminCommand {
           break;
         case "ufs":
           command = Command.UFS;
+          break;
+        case "jobservice":
+          command = Command.JOBSERVICE;
           break;
         default:
           System.out.println(getUsage());
@@ -141,12 +154,18 @@ public final class ReportCommand extends AbstractFsAdminCommand {
         break;
       case SUMMARY:
         SummaryCommand summaryCommand = new SummaryCommand(
-            mMetaClient, mBlockClient, mPrintStream);
+            mMetaClient, mBlockClient, mConf.get(PropertyKey.USER_DATE_FORMAT_PATTERN),
+            mPrintStream);
         summaryCommand.run();
         break;
       case UFS:
         UfsCommand ufsCommand = new UfsCommand(mFsClient);
         ufsCommand.run();
+        break;
+      case JOBSERVICE:
+        JobServiceMetricsCommand jobmetricsCommand = new JobServiceMetricsCommand(
+            mJobMasterClient, mPrintStream, mConf.get(PropertyKey.USER_DATE_FORMAT_PATTERN));
+        jobmetricsCommand.run();
         break;
       default:
         break;
@@ -193,7 +212,8 @@ public final class ReportCommand extends AbstractFsAdminCommand {
         + "    capacity         worker capacity information\n"
         + "    metrics          metrics information\n"
         + "    summary          cluster summary\n"
-        + "    ufs              under storage system information\n";
+        + "    ufs              under storage system information\n"
+        + "    jobservice       job service metrics information\n";
   }
 
   @Override

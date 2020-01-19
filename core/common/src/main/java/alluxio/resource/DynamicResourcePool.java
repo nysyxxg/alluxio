@@ -240,37 +240,38 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
     mMinCapacity = options.getMinCapacity();
     mAvailableResources = new ArrayDeque<>(Math.min(mMaxCapacity, 32));
 
-    mGcFuture = mExecutor.scheduleAtFixedRate(new Runnable() {
-      @Override
-      public void run() {
-        List<T> resourcesToGc = new ArrayList<>();
+    mGcFuture = mExecutor.scheduleAtFixedRate(() -> {
+      List<T> resourcesToGc = new ArrayList<>();
 
-        try {
-          mLock.lock();
-          if (mResources.size() <= mMinCapacity) {
-            return;
-          }
-          int currentSize = mResources.size();
-          Iterator<ResourceInternal<T>> iterator = mAvailableResources.iterator();
-          while (iterator.hasNext()) {
-            ResourceInternal<T> next = iterator.next();
-            if (shouldGc(next)) {
-              resourcesToGc.add(next.mResource);
-              iterator.remove();
-              mResources.remove(next.mResource);
-              currentSize--;
-              if (currentSize <= mMinCapacity) {
-                break;
-              }
+      try {
+        mLock.lock();
+        if (mResources.size() <= mMinCapacity) {
+          return;
+        }
+        int currentSize = mResources.size();
+        Iterator<ResourceInternal<T>> iterator = mAvailableResources.iterator();
+        while (iterator.hasNext()) {
+          ResourceInternal<T> next = iterator.next();
+          if (shouldGc(next)) {
+            resourcesToGc.add(next.mResource);
+            iterator.remove();
+            mResources.remove(next.mResource);
+            currentSize--;
+            if (currentSize <= mMinCapacity) {
+              break;
             }
           }
-        } finally {
-          mLock.unlock();
         }
+      } finally {
+        mLock.unlock();
+      }
 
-        for (T resource : resourcesToGc) {
-          LOG.info("Resource {} is garbage collected.", resource);
+      for (T resource : resourcesToGc) {
+        LOG.info("Resource {} is garbage collected.", resource);
+        try {
           closeResource(resource);
+        } catch (IOException e) {
+          LOG.warn("Failed to close resource {}.", resource, e);
         }
       }
     }, options.getInitialDelayMs(), options.getGcIntervalMs(), TimeUnit.MILLISECONDS);
@@ -301,6 +302,7 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
    * @param unit the unit to use for time
    * @return a resource taken from the pool
    * @throws TimeoutException if it fails to acquire because of time out
+   * @throws IOException if the thread is interrupted while acquiring the resource
    */
   @Override
   public T acquire(long time, TimeUnit unit) throws TimeoutException, IOException {
@@ -340,8 +342,9 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
             throw new TimeoutException("Acquire resource times out.");
           }
         } catch (InterruptedException e) {
-          // Restore the interrupt flag so that it can be handled later.
+          // TODO(calvin): Propagate the interrupted exception instead of converting to IOException
           Thread.currentThread().interrupt();
+          throw new IOException("Thread interrupted while acquiring client from pool: " + this);
         }
       }
     } finally {
@@ -383,7 +386,7 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
    * Closes the pool and clears all the resources. The resource pool should not be used after this.
    */
   @Override
-  public void close() {
+  public void close() throws IOException {
     try {
       mLock.lock();
       if (mAvailableResources.size() != mResources.size()) {
@@ -500,15 +503,7 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
    *
    * @param resource the resource to close
    */
-  protected abstract void closeResource(T resource);
-
-  /**
-   * Similar as above but this guarantees that the resource is closed after the function returns
-   * unless it fails to close.
-   *
-   * @param resource the resource to close
-   */
-  protected abstract void closeResourceSync(T resource);
+  protected abstract void closeResource(T resource) throws IOException;
 
   /**
    * Creates a new resource.

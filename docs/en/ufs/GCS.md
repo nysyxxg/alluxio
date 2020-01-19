@@ -2,7 +2,7 @@
 layout: global
 title: Google Cloud Storage
 nickname: Google Cloud Storage
-group: Under Stores
+group: Storage Integrations
 priority: 2
 ---
 
@@ -12,7 +12,7 @@ priority: 2
 This guide describes how to configure Alluxio with [Google Cloud Storage (GCS)](https://cloud.google.com/storage/)
 as the under storage system.
 
-## Initial Setup
+## Prerequisites
 
 The Alluxio binaries must be on your machine. You can either
 [compile Alluxio]({{ '/en/contributor/Building-Alluxio-From-Source.html' | relativize_url }}), or
@@ -26,26 +26,35 @@ the bucket, or using an existing one. For the purposes of this guide, the GCS bu
 For more information on GCS, please read its
 [documentation](https://cloud.google.com/storage/docs/overview).
 
-## Configuring Alluxio
+## Basic Setup
+
+A GCS bucket can be mounted to the Alluxio either at the root of the namespace, or at a nested directory.
+
+### Root Mount Point
 
 Configure Alluxio to use under storage systems by modifying
 `conf/alluxio-site.properties`. If it does not exist, create the configuration file from the
 template.
 
-```bash
+```console
 $ cp conf/alluxio-site.properties.template conf/alluxio-site.properties
 ```
 
-Configure Alluxio to use GCS as its under storage system. The first modification is to
+Configure Alluxio to use GCS as its root under storage system. The first modification is to
 specify an **existing** GCS bucket and directory as the under storage system by modifying
 `conf/alluxio-site.properties` to include:
 
-{% include Configuring-Alluxio-with-GCS/underfs-address.md %}
+```
+alluxio.master.mount.table.root.ufs=gs://GCS_BUCKET/GCS_DIRECTORY
+```
 
-Specify the Google credentials for GCS access. In `conf/alluxio-site.properties`,
-add:
+The google credentials must also be specified for the root mount point. In
+`conf/alluxio-site.properties`, add:
 
-{% include Configuring-Alluxio-with-GCS/google.md %}
+```properties
+alluxio.master.mount.table.root.option.fs.gcs.accessKeyId=<GCS_ACCESS_KEY_ID>
+alluxio.master.mount.table.root.option.fs.gcs.secretAccessKey=<GCS_SECRET_ACCESS_KEY>
+```
 
 Replace `<GCS_ACCESS_KEY_ID>` and `<GCS_SECRET_ACCESS_KEY>` with actual
 [GCS interoperable storage access keys](https://console.cloud.google.com/storage/settings),
@@ -57,38 +66,62 @@ Click on `Create a new key` to get the Access Key and Secret pair.
 After these changes, Alluxio should be configured to work with GCS as its under storage system, and
 you can [Run Alluxio Locally with GCS](#running-alluxio-locally-with-gcs).
 
-### Configuring Application Dependency
+### Nested Mount Point
 
-When building your application to use Alluxio, your application should include a client module, the
-`alluxio-core-client-fs` module to use the
-[Alluxio file system interface]({{ '/en/api/FS-API.html' | relativize_url }}) or the
-`alluxio-core-client-hdfs` module to use the
-[Hadoop file system interface](https://wiki.apache.org/hadoop/HCFS). For example, if you
-are using [maven](https://maven.apache.org/), you can add the dependency to your application with:
+An GCS location can be mounted at a nested directory in the Alluxio namespace to have unified access
+to multiple under storage systems. Alluxio's [Command Line Interface]({{ '/en/operation/User-CLI.html' | relativize_url }}) can be used for this purpose.
 
-{% include Configuring-Alluxio-with-GCS/dependency.md %}
+First, within `conf/alluxio-site.properties`, specify the master host:
+```properties
+alluxio.master.hostname=localhost
+```
+
+Then, mount GCS:
+```console
+$ ./bin/alluxio fs mount \
+  --option fs.gcs.accessKeyId=<GCS_ACCESS_KEY_ID> \
+  --option fs.gcs.secretAccessKey=<GCS_SECRET_ACCESS_KEY> \
+  /gcs gs://GCS_BUCKET/GCS_DIRECTORY
+```
 
 ## Running Alluxio Locally with GCS
 
 Start up Alluxio locally to see that everything works.
 
-{% include Common-Commands/start-alluxio.md %}
+```console
+$ ./bin/alluxio format
+$ ./bin/alluxio-start.sh local SudoMount
+```
 
 This should start an Alluxio master and an Alluxio worker. You can see the master UI at
 [http://localhost:19999](http://localhost:19999).
 
 Run a simple example program:
 
-{% include Common-Commands/runTests.md %}
+```console
+$ ./bin/alluxio runTests
+```
 
 Visit your GCS directory `GCS_BUCKET/GCS_DIRECTORY` to verify the files
 and directories created by Alluxio exist. For this test, you should see files named like:
 
-{% include Configuring-Alluxio-with-GCS/gcs-file.md %}
+```
+GCS_BUCKET/GCS_DIRECTORY/default_tests_files/BASIC_CACHE_THROUGH
+```
 
 To stop Alluxio, you can run:
 
-{% include Common-Commands/stop-alluxio.md %}
+```console
+$ ./bin/alluxio-stop.sh local
+```
+
+## Advanced Setup
+
+### Customize the Directory Suffix
+
+Directories are represented in GCS as zero-byte objects named with a specified suffix. The
+directory suffix can be updated with the configuration parameter
+[alluxio.underfs.gcs.directory.suffix]({{ '/en/reference/Properties-List.html' | relativize_url }}#alluxio.underfs.gcs.directory.suffix).
 
 ## GCS Access Control
 
@@ -105,7 +138,7 @@ time when the metadata is loaded to Alluxio namespace.
 
 By default, Alluxio tries to extract the GCS user id from the credentials. Optionally,
 `alluxio.underfs.gcs.owner.id.to.username.mapping` can be used to specify a preset gcs owner id to
-Alluxio username static mapping in the format "id1=user1;id2=user2". The Google Cloud Storage IDs
+Alluxio username static mapping in the format `id1=user1;id2=user2`. The Google Cloud Storage IDs
 can be found at the console [address](https://console.cloud.google.com/storage/settings). Please use
 the "Owners" one.
 
@@ -113,8 +146,8 @@ the "Owners" one.
 
 Alluxio checks the GCS bucket READ/WRITE ACL to determine the owner's permission mode to a Alluxio
 file. For example, if the GCS user has read-only access to the underlying bucket, the mounted
-directory and files would have 0500 mode. If the GCS user has full access to the underlying bucket,
-the mounted directory and files would have 0700 mode.
+directory and files would have `0500` mode. If the GCS user has full access to the underlying bucket,
+the mounted directory and files would have `0700` mode.
 
 ### Mount point sharing
 
@@ -123,5 +156,5 @@ If you want to share the GCS mount point with other users in Alluxio namespace, 
 
 ### Permission change
 
-Command such as chown, chgrp, and chmod to Alluxio directories and files do **NOT** propagate to the underlying
+Command such as `chown`, `chgrp`, and `chmod` to Alluxio directories and files do **NOT** propagate to the underlying
 GCS buckets nor objects.

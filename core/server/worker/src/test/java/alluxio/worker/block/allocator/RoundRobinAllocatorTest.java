@@ -11,9 +11,8 @@
 
 package alluxio.worker.block.allocator;
 
-import alluxio.Configuration;
-import alluxio.ConfigurationTestUtils;
-import alluxio.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
 
 import org.junit.Test;
 
@@ -27,8 +26,9 @@ public final class RoundRobinAllocatorTest extends AllocatorTestBase {
    */
   @Test
   public void allocateBlock() throws Exception {
-    Configuration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, RoundRobinAllocator.class.getName());
-    mAllocator = Allocator.Factory.create(getManagerView());
+    ServerConfiguration.set(PropertyKey.WORKER_ALLOCATOR_CLASS,
+        RoundRobinAllocator.class.getName());
+    mAllocator = Allocator.Factory.create(getMetadataEvictorView());
     //
     // idx | tier1 | tier2 | tier3
     //  0    1000
@@ -218,6 +218,6 @@ public final class RoundRobinAllocatorTest extends AllocatorTestBase {
     //  1               ├─── 700   <--- alloc
     //  2               └─── 0
     //
-    ConfigurationTestUtils.resetConfiguration();
+    ServerConfiguration.reset();
   }
 }

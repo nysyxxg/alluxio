@@ -11,14 +11,18 @@
 
 package alluxio.worker;
 
-import alluxio.Configuration;
-import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.RuntimeConstants;
+import alluxio.grpc.GrpcServer;
+import alluxio.grpc.GrpcServerAddress;
+import alluxio.grpc.GrpcServerBuilder;
+import alluxio.grpc.GrpcService;
 import alluxio.metrics.MetricsSystem;
 import alluxio.metrics.sink.MetricsServlet;
-import alluxio.network.thrift.ThriftUtils;
-import alluxio.security.authentication.TransportProvider;
+import alluxio.security.user.ServerUserState;
 import alluxio.underfs.JobUfsManager;
 import alluxio.underfs.UfsManager;
 import alluxio.util.CommonUtils;
@@ -29,18 +33,12 @@ import alluxio.web.JobWorkerWebServer;
 import alluxio.wire.WorkerNetAddress;
 
 import com.google.common.base.Throwables;
-import org.apache.thrift.TMultiplexedProcessor;
-import org.apache.thrift.TProcessor;
-import org.apache.thrift.protocol.TBinaryProtocol;
-import org.apache.thrift.server.TThreadPoolServer;
-import org.apache.thrift.transport.TServerSocket;
-import org.apache.thrift.transport.TTransportException;
-import org.apache.thrift.transport.TTransportFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
@@ -53,26 +51,29 @@ import javax.annotation.concurrent.NotThreadSafe;
 public final class AlluxioJobWorkerProcess implements JobWorkerProcess {
   private static final Logger LOG = LoggerFactory.getLogger(AlluxioJobWorkerProcess.class);
 
+  /** FileSystem client for jobs. */
+  private final FileSystem mFileSystem;
+
+  /** FileSystemContext for jobs. */
+  private final FileSystemContext mFsContext;
+
   /** The job worker. */
   private JobWorker mJobWorker;
 
-  /** Whether the worker is serving the RPC server. */
-  private boolean mIsServingRPC = false;
-
-  /** The transport provider to create thrift client transport. */
-  private TransportProvider mTransportProvider;
-
-  /** Thread pool for thrift. */
-  private TThreadPoolServer mThriftServer;
-
-  /** Server socket for thrift. */
-  private TServerSocket mThriftServerSocket;
-
-  /** RPC local port for thrift. */
+  /** RPC local port for gRPC. */
   private int mRPCPort;
 
-  /** The address for the rpc server. */
-  private InetSocketAddress mRpcAddress;
+  /** gRPC server. */
+  private GrpcServer mGrpcServer;
+
+  /** Used for auto binding. **/
+  private ServerSocket mBindSocket;
+
+  /** The connect address for the rpc server. */
+  private InetSocketAddress mRpcConnectAddress;
+
+  /** The bind address for the rpc server. */
+  private InetSocketAddress mRpcBindAddress;
 
   /** Worker start time in milliseconds. */
   private long mStartTimeMs;
@@ -90,24 +91,36 @@ public final class AlluxioJobWorkerProcess implements JobWorkerProcess {
    */
   AlluxioJobWorkerProcess() {
     try {
+      mFsContext = FileSystemContext.create(ServerConfiguration.global());
+      mFileSystem = FileSystem.Factory.create(mFsContext);
+
       mStartTimeMs = System.currentTimeMillis();
       mUfsManager = new JobUfsManager();
-      mJobWorker = new JobWorker(mUfsManager);
+      mJobWorker = new JobWorker(mFileSystem, mFsContext, mUfsManager);
 
       // Setup web server
       mWebServer = new JobWorkerWebServer(ServiceType.JOB_WORKER_WEB.getServiceName(),
-          NetworkAddressUtils.getBindAddress(ServiceType.JOB_WORKER_WEB), this);
+          NetworkAddressUtils.getBindAddress(ServiceType.JOB_WORKER_WEB,
+              ServerConfiguration.global()),
+          this);
 
-      // Setup Thrift server
-      mTransportProvider = alluxio.security.authentication.TransportProvider.Factory.create();
-      mThriftServerSocket = createThriftServerSocket();
-      mRPCPort = ThriftUtils.getThriftPort(mThriftServerSocket);
+      // Random port binding.
+      InetSocketAddress configuredBindAddress =
+              NetworkAddressUtils.getBindAddress(ServiceType.JOB_WORKER_RPC,
+                  ServerConfiguration.global());
+      if (configuredBindAddress.getPort() == 0) {
+        mBindSocket = new ServerSocket(0);
+        mRPCPort = mBindSocket.getLocalPort();
+      } else {
+        mRPCPort = configuredBindAddress.getPort();
+      }
       // Reset worker RPC port based on assigned port number
-      Configuration.set(PropertyKey.JOB_WORKER_RPC_PORT, Integer.toString(mRPCPort));
-      mThriftServer = createThriftServer();
+      ServerConfiguration.set(PropertyKey.JOB_WORKER_RPC_PORT, Integer.toString(mRPCPort));
 
-      mRpcAddress =
-          NetworkAddressUtils.getConnectAddress(ServiceType.JOB_WORKER_RPC);
+      mRpcBindAddress = NetworkAddressUtils.getBindAddress(ServiceType.JOB_WORKER_RPC,
+          ServerConfiguration.global());
+      mRpcConnectAddress = NetworkAddressUtils.getConnectAddress(ServiceType.JOB_WORKER_RPC,
+          ServerConfiguration.global());
     } catch (Exception e) {
       LOG.error(e.getMessage(), e);
       throw Throwables.propagate(e);
@@ -116,7 +129,7 @@ public final class AlluxioJobWorkerProcess implements JobWorkerProcess {
 
   @Override
   public InetSocketAddress getRpcAddress() {
-    return mRpcAddress;
+    return mRpcConnectAddress;
   }
 
   @Override
@@ -141,7 +154,7 @@ public final class AlluxioJobWorkerProcess implements JobWorkerProcess {
   public boolean waitForReady(int timeoutMs) {
     try {
       CommonUtils.waitFor(this + " to start",
-          () -> mThriftServer.isServing()
+          () -> isServing()
               && mWebServer != null
               && mWebServer.getServer().isRunning(),
           WaitForOptions.defaults().setTimeoutMs(timeoutMs));
@@ -168,37 +181,71 @@ public final class AlluxioJobWorkerProcess implements JobWorkerProcess {
     startWorkers();
     LOG.info("Started {} with id {}", this, JobWorkerIdRegistry.getWorkerId());
 
-    mIsServingRPC = true;
-
     // Start serving RPC, this will block
     LOG.info("Alluxio job worker version {} started. "
             + "bindHost={}, connectHost={}, rpcPort={}, webPort={}",
         RuntimeConstants.VERSION,
-        NetworkAddressUtils.getBindAddress(ServiceType.JOB_WORKER_RPC),
-        NetworkAddressUtils.getConnectAddress(ServiceType.JOB_WORKER_RPC),
-        NetworkAddressUtils.getPort(ServiceType.JOB_WORKER_RPC),
-        NetworkAddressUtils.getPort(ServiceType.JOB_WORKER_WEB));
-    mThriftServer.serve();
+        NetworkAddressUtils.getBindAddress(ServiceType.JOB_WORKER_RPC,
+            ServerConfiguration.global()),
+        NetworkAddressUtils.getConnectAddress(ServiceType.JOB_WORKER_RPC,
+            ServerConfiguration.global()),
+        NetworkAddressUtils.getPort(ServiceType.JOB_WORKER_RPC, ServerConfiguration.global()),
+        NetworkAddressUtils.getPort(ServiceType.JOB_WORKER_WEB, ServerConfiguration.global()));
+
+    startServingRPCServer();
     LOG.info("Alluxio job worker ended");
+  }
+
+  private void startServingRPCServer() {
+    try {
+      if (mBindSocket != null) {
+        // Socket opened for auto bind.
+        // Close it.
+        mBindSocket.close();
+      }
+
+      LOG.info("Starting gRPC server on address {}", mRpcConnectAddress);
+      GrpcServerBuilder serverBuilder = GrpcServerBuilder.forAddress(
+          GrpcServerAddress.create(mRpcConnectAddress.getHostName(), mRpcBindAddress),
+          ServerConfiguration.global(), ServerUserState.global());
+
+      for (Map.Entry<alluxio.grpc.ServiceType, GrpcService> serviceEntry : mJobWorker.getServices()
+          .entrySet()) {
+        LOG.info("Registered service:{}", serviceEntry.getKey().name());
+        serverBuilder.addService(serviceEntry.getValue());
+      }
+
+      mGrpcServer = serverBuilder.build().start();
+      LOG.info("Started gRPC server on address {}", mRpcConnectAddress);
+
+      // Wait until the server is shut down.
+      mGrpcServer.awaitTermination();
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private boolean isServing() {
+    return mGrpcServer != null && mGrpcServer.isServing();
   }
 
   @Override
   public void stop() throws Exception {
-    LOG.info("Stopping RPC server on {} @ {}", this, mRpcAddress);
-    if (mIsServingRPC) {
+    LOG.info("Stopping RPC server on {} @ {}", this, mRpcConnectAddress);
+    if (isServing()) {
       stopServing();
       stopWorkers();
-      mIsServingRPC = false;
     }
   }
 
   @Override
   public WorkerNetAddress getAddress() {
     return new WorkerNetAddress()
-        .setHost(NetworkAddressUtils.getConnectHost(ServiceType.JOB_WORKER_RPC))
-        .setRpcPort(Configuration.getInt(PropertyKey.JOB_WORKER_RPC_PORT))
-        .setDataPort(Configuration.getInt(PropertyKey.JOB_WORKER_DATA_PORT))
-        .setWebPort(Configuration.getInt(PropertyKey.JOB_WORKER_WEB_PORT));
+        .setHost(NetworkAddressUtils.getConnectHost(ServiceType.JOB_WORKER_RPC,
+            ServerConfiguration.global()))
+        .setRpcPort(ServerConfiguration.getInt(PropertyKey.JOB_WORKER_RPC_PORT))
+        .setDataPort(ServerConfiguration.getInt(PropertyKey.JOB_WORKER_DATA_PORT))
+        .setWebPort(ServerConfiguration.getInt(PropertyKey.JOB_WORKER_WEB_PORT));
   }
 
   private void startWorkers() throws Exception {
@@ -211,65 +258,15 @@ public final class AlluxioJobWorkerProcess implements JobWorkerProcess {
   }
 
   private void stopServing() {
-    mThriftServer.stop();
-    mThriftServerSocket.close();
+    if (isServing()) {
+      if (!mGrpcServer.shutdown()) {
+        LOG.warn("RPC server shutdown timed out.");
+      }
+    }
     try {
       mWebServer.stop();
     } catch (Exception e) {
       LOG.error("Failed to stop web server", e);
-    }
-  }
-
-  private void registerServices(TMultiplexedProcessor processor, Map<String, TProcessor> services) {
-    for (Map.Entry<String, TProcessor> service : services.entrySet()) {
-      processor.registerProcessor(service.getKey(), service.getValue());
-    }
-  }
-
-  /**
-   *
-   * Helper method to create a thrift server for handling incoming RPC requests.
-   *
-   * @return a thrift server
-   */
-  private TThreadPoolServer createThriftServer() {
-    int minWorkerThreads = Configuration.getInt(PropertyKey.WORKER_BLOCK_THREADS_MIN);
-    int maxWorkerThreads = Configuration.getInt(PropertyKey.WORKER_BLOCK_THREADS_MAX);
-    TMultiplexedProcessor processor = new TMultiplexedProcessor();
-
-    registerServices(processor, mJobWorker.getServices());
-
-    // Return a TTransportFactory based on the authentication type
-    TTransportFactory tTransportFactory;
-    try {
-      String serverName = NetworkAddressUtils.getConnectHost(ServiceType.JOB_WORKER_RPC);
-      tTransportFactory = mTransportProvider.getServerTransportFactory(serverName);
-    } catch (IOException e) {
-      throw Throwables.propagate(e);
-    }
-    TThreadPoolServer.Args args = new TThreadPoolServer.Args(mThriftServerSocket)
-        .minWorkerThreads(minWorkerThreads).maxWorkerThreads(maxWorkerThreads).processor(processor)
-        .transportFactory(tTransportFactory)
-        .protocolFactory(new TBinaryProtocol.Factory(true, true));
-    if (Configuration.getBoolean(PropertyKey.TEST_MODE)) {
-      args.stopTimeoutVal = 0;
-    } else {
-      args.stopTimeoutVal = Constants.THRIFT_STOP_TIMEOUT_SECONDS;
-    }
-    return new TThreadPoolServer(args);
-  }
-
-  /**
-   * Helper method to create a {@link TServerSocket} for the RPC server.
-   *
-   * @return a thrift server socket
-   */
-  private TServerSocket createThriftServerSocket() {
-    try {
-      return new TServerSocket(NetworkAddressUtils.getBindAddress(ServiceType.JOB_WORKER_RPC));
-    } catch (TTransportException e) {
-      LOG.error(e.getMessage(), e);
-      throw Throwables.propagate(e);
     }
   }
 

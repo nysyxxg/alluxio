@@ -11,12 +11,20 @@
 
 package alluxio.testutils;
 
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import alluxio.AlluxioURI;
+import alluxio.AuthenticatedClientUserResource;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.grpc.DeletePOptions;
 import alluxio.master.LocalAlluxioCluster;
+import alluxio.master.file.FileSystemMaster;
+import alluxio.master.file.contexts.DeleteContext;
+import alluxio.master.file.contexts.ListStatusContext;
 import alluxio.metrics.MetricsSystem;
-import alluxio.security.LoginUserTestUtils;
 import alluxio.security.authentication.AuthenticatedClientUser;
+import alluxio.underfs.UfsMode;
+import alluxio.util.SecurityUtils;
+import alluxio.wire.FileInfo;
 
 import org.junit.rules.TestRule;
 import org.junit.runner.Description;
@@ -34,10 +42,10 @@ import javax.annotation.concurrent.NotThreadSafe;
 /**
  * A JUnit Rule resource for automatically managing a local alluxio cluster for testing. To use it,
  * create an instance of the class under a {@literal @}Rule annotation, with the required
- * configuration parameters, and any necessary explicit {@link Configuration} settings. The Alluxio
- * cluster will be set up from scratch at the end of every method (or at the start of every suite if
- * {@literal @}ClassRule is used), and destroyed at the end. Below is an example of declaring and
- * using it.
+ * configuration parameters, and any necessary explicit {@link ServerConfiguration} settings. The
+ * Alluxio cluster will be set up from scratch at the end of every method (or at the start of
+ * every suite if {@literal @}ClassRule is used), and destroyed at the end. Below is an example
+ * of declaring and using it.
  *
  * <pre>
  *   public class SomethingTest {
@@ -71,6 +79,7 @@ import javax.annotation.concurrent.NotThreadSafe;
  */
 @NotThreadSafe
 public final class LocalAlluxioClusterResource implements TestRule {
+
   /** Number of Alluxio workers in the cluster. */
   private final int mNumWorkers;
 
@@ -80,11 +89,14 @@ public final class LocalAlluxioClusterResource implements TestRule {
    */
   private final boolean mStartCluster;
 
-  /** Configuration values for the cluster. */
+  /** ServerConfiguration values for the cluster. */
   private final Map<PropertyKey, String> mConfiguration = new HashMap<>();
 
   /** The Alluxio cluster being managed. */
   private LocalAlluxioCluster mLocalAlluxioCluster = null;
+
+  /** The name of the test/cluster. */
+  private String mTestName = "test";
 
   /**
    * Creates a new instance.
@@ -98,7 +110,7 @@ public final class LocalAlluxioClusterResource implements TestRule {
     mStartCluster = startCluster;
     mNumWorkers = numWorkers;
     mConfiguration.putAll(configuration);
-    MetricsSystem.resetAllCounters();
+    MetricsSystem.resetCountersAndGauges();
   }
 
   /**
@@ -129,16 +141,15 @@ public final class LocalAlluxioClusterResource implements TestRule {
    */
   public void start() throws Exception {
     AuthenticatedClientUser.remove();
-    LoginUserTestUtils.resetLoginUser();
     // Create a new cluster.
     mLocalAlluxioCluster = new LocalAlluxioCluster(mNumWorkers);
     // Init configuration for integration test
-    mLocalAlluxioCluster.initConfiguration();
+    mLocalAlluxioCluster.initConfiguration(mTestName);
     // Overwrite the test configuration with test specific parameters
     for (Entry<PropertyKey, String> entry : mConfiguration.entrySet()) {
-      Configuration.set(entry.getKey(), entry.getValue());
+      ServerConfiguration.set(entry.getKey(), entry.getValue());
     }
-    Configuration.validate();
+    ServerConfiguration.global().validate();
     // Start the cluster
     mLocalAlluxioCluster.start();
   }
@@ -148,32 +159,51 @@ public final class LocalAlluxioClusterResource implements TestRule {
     return new Statement() {
       @Override
       public void evaluate() throws Throwable {
+        IntegrationTestUtils.reserveMasterPorts();
+        mTestName = IntegrationTestUtils
+            .getTestName(description.getTestClass().getSimpleName(), description.getMethodName());
         try {
-          boolean startCluster = mStartCluster;
-          Annotation configAnnotation = description.getAnnotation(Config.class);
-          if (configAnnotation != null) {
-            Config config = (Config) configAnnotation;
-            // Override the configuration parameters with any configuration params
-            for (int i = 0; i < config.confParams().length; i += 2) {
-              mConfiguration.put(PropertyKey.fromString(config.confParams()[i]),
-                  config.confParams()[i + 1]);
+          try {
+            boolean startCluster = mStartCluster;
+            Annotation configAnnotation = description.getAnnotation(Config.class);
+            if (configAnnotation != null) {
+              Config config = (Config) configAnnotation;
+              // Override the configuration parameters with any configuration params
+              for (int i = 0; i < config.confParams().length; i += 2) {
+                mConfiguration.put(PropertyKey.fromString(config.confParams()[i]),
+                    config.confParams()[i + 1]);
+              }
+              // Override startCluster
+              startCluster = config.startCluster();
             }
-            // Override startCluster
-            startCluster = config.startCluster();
+            if (startCluster) {
+              start();
+            }
+          } catch (Exception e) {
+            throw new RuntimeException(e);
           }
-          if (startCluster) {
-            start();
+          try {
+            statement.evaluate();
+          } finally {
+            mLocalAlluxioCluster.stop();
           }
-        } catch (Exception e) {
-          throw new RuntimeException(e);
-        }
-        try {
-          statement.evaluate();
         } finally {
-          mLocalAlluxioCluster.stop();
+          IntegrationTestUtils.releaseMasterPorts();
         }
       }
     };
+  }
+
+  /**
+   * Returns a resource which will reset the cluster without restarting it. The rule will perform
+   * operations on the running cluster to get back to a clean state. This is primarily useful for
+   * when the {@link LocalAlluxioCluster} is a {@code @ClassRule}, so this reset rule can reset
+   * the cluster between tests.
+   *
+   * @return a {@link TestRule} for resetting the cluster
+   */
+  public TestRule getResetResource() {
+    return new ResetRule(this);
   }
 
   /**
@@ -223,6 +253,49 @@ public final class LocalAlluxioClusterResource implements TestRule {
      */
     public LocalAlluxioClusterResource build() {
       return new LocalAlluxioClusterResource(mStartCluster, mNumWorkers, mConfiguration);
+    }
+  }
+
+  private final class ResetRule implements TestRule {
+    private final LocalAlluxioClusterResource mCluster;
+
+    ResetRule(LocalAlluxioClusterResource cluster) {
+      mCluster = cluster;
+    }
+
+    @Override
+    public Statement apply(Statement statement, Description description) {
+      return new Statement() {
+        @Override
+        public void evaluate() throws Throwable {
+          try {
+            statement.evaluate();
+          } finally {
+            FileSystemMaster fsm =
+                mCluster.mLocalAlluxioCluster.getLocalAlluxioMaster().getMasterProcess()
+                    .getMaster(FileSystemMaster.class);
+
+            if (SecurityUtils.isAuthenticationEnabled(ServerConfiguration.global())) {
+              // Reset the state as the root inode user (superuser).
+              try (AuthenticatedClientUserResource r = new AuthenticatedClientUserResource(
+                  fsm.getRootInodeOwner(), ServerConfiguration.global())) {
+                resetCluster(fsm);
+              }
+            } else {
+              resetCluster(fsm);
+            }
+          }
+        }
+      };
+    }
+
+    private void resetCluster(FileSystemMaster fsm) throws Exception {
+      fsm.updateUfsMode(new AlluxioURI(fsm.getUfsAddress()), UfsMode.READ_WRITE);
+      for (FileInfo fileInfo : fsm
+          .listStatus(new AlluxioURI("/"), ListStatusContext.defaults())) {
+        fsm.delete(new AlluxioURI(fileInfo.getPath()), DeleteContext
+            .create(DeletePOptions.newBuilder().setUnchecked(true).setRecursive(true)));
+      }
     }
   }
 

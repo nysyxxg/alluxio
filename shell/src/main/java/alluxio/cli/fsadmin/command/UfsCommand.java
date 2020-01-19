@@ -12,11 +12,13 @@
 package alluxio.cli.fsadmin.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.options.UpdateUfsModeOptions;
+import alluxio.conf.AlluxioConfiguration;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
-import alluxio.underfs.UnderFileSystem;
+import alluxio.grpc.UfsPMode;
+import alluxio.grpc.UpdateUfsModePOptions;
 import alluxio.util.io.PathUtils;
 
 import org.apache.commons.cli.CommandLine;
@@ -31,6 +33,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * Update attributes for an existing mount point.
  */
 @ThreadSafe
+@PublicApi
 public final class UfsCommand extends AbstractFsAdminCommand {
   private static final Option MODE_OPTION =
       Option.builder()
@@ -42,8 +45,9 @@ public final class UfsCommand extends AbstractFsAdminCommand {
 
   /**
    * @param context fsadmin command context
+   * @param alluxioConf Alluxio configuration
    */
-  public UfsCommand(Context context) {
+  public UfsCommand(Context context, AlluxioConfiguration alluxioConf) {
     super(context);
   }
 
@@ -73,22 +77,23 @@ public final class UfsCommand extends AbstractFsAdminCommand {
       return -1;
     }
     if (cl.hasOption(MODE_OPTION.getLongOpt())) {
-      UnderFileSystem.UfsMode mode;
+      UfsPMode mode;
       switch (cl.getOptionValue(MODE_OPTION.getLongOpt())) {
         case "noAccess":
-          mode = UnderFileSystem.UfsMode.NO_ACCESS;
+          mode = UfsPMode.NO_ACCESS;
           break;
         case "readOnly":
-          mode = UnderFileSystem.UfsMode.READ_ONLY;
+          mode = UfsPMode.READ_ONLY;
           break;
         case "readWrite":
-          mode = UnderFileSystem.UfsMode.READ_WRITE;
+          mode = UfsPMode.READ_WRITE;
           break;
         default:
           System.out.println("Unrecognized mode");
           return -1;
       }
-      mFsClient.updateUfsMode(ufsUri, UpdateUfsModeOptions.defaults().setUfsMode(mode));
+      UpdateUfsModePOptions options = UpdateUfsModePOptions.newBuilder().setUfsMode(mode).build();
+      mFsClient.updateUfsMode(ufsUri, options);
       System.out.println("Ufs mode updated");
       return 0;
     }

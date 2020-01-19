@@ -15,6 +15,12 @@ package alluxio.metrics;
  * Metrics of Alluxio master.
  */
 public final class MasterMetrics {
+  // metrics names for BackupManager
+  public static final String LAST_BACKUP_ENTRIES_COUNT = "LastBackupEntriesCount";
+  public static final String LAST_BACKUP_RESTORE_COUNT = "LastBackupRestoreCount";
+  public static final String LAST_BACKUP_TIME_MS = "LastBackupTimeMs";
+  public static final String LAST_BACKUP_RESTORE_TIME_MS = "LastBackupRestoreTimeMs";
+
   // metrics names for FileSystemMaster
   public static final String DIRECTORIES_CREATED = "DirectoriesCreated";
   public static final String FILE_BLOCK_INFOS_GOT = "FileBlockInfosGot";
@@ -42,10 +48,16 @@ public final class MasterMetrics {
   public static final String SET_ATTRIBUTE_OPS = "SetAttributeOps";
   public static final String UNMOUNT_OPS = "UnmountOps";
   public static final String FILES_PINNED = "FilesPinned";
-  public static final String PATHS_TOTAL = "PathsTotal";
+  public static final String TOTAL_PATHS = "TotalPaths";
   public static final String UFS_CAPACITY_TOTAL = "UfsCapacityTotal";
   public static final String UFS_CAPACITY_USED = "UfsCapacityUsed";
   public static final String UFS_CAPACITY_FREE = "UfsCapacityFree";
+
+  // metrics names for journal
+  public static final String JOURNAL_FLUSH_FAILURE = "JournalFlushFailure";
+  public static final String JOURNAL_FLUSH_TIMER = "JournalFlushTimer";
+  public static final String JOURNAL_GAIN_PRIMACY_TIMER = "JournalGainPrimacyTimer";
+  public static final String UFS_JOURNAL_FAILURE_RECOVER_TIMER = "UfsJournalFailureRecoverTime";
 
   private MasterMetrics() {} // prevent instantiation
 }

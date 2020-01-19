@@ -11,10 +11,12 @@
 
 package alluxio.cli.fs.command;
 
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
+import alluxio.wire.SyncPointInfo;
 
 import org.apache.commons.cli.CommandLine;
 
@@ -24,14 +26,15 @@ import java.util.List;
 /**
  * This class represents a getSyncPathList Command.
  */
+@PublicApi
 public class GetSyncPathListCommand extends AbstractFileSystemCommand{
   /**
    * Create a GetSyncPathListCommand object.
    *
-   * @param fs file system
+   * @param fsContext file system
    */
-  public GetSyncPathListCommand(FileSystem fs) {
-    super(fs);
+  public GetSyncPathListCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -41,10 +44,23 @@ public class GetSyncPathListCommand extends AbstractFileSystemCommand{
 
   @Override
   public int run(CommandLine cl) throws AlluxioException, IOException {
-    List<String> files = mFileSystem.getSyncPathList();
+    List<SyncPointInfo> files = mFileSystem.getSyncPathList();
     System.out.println("The following paths are under active sync");
-    for (String file : files) {
-      System.out.println(file);
+    for (SyncPointInfo syncPointInfo : files) {
+      System.out.print(syncPointInfo.getSyncPointUri() + "\t");
+      switch (syncPointInfo.getSyncStatus()) {
+        case NOT_INITIALLY_SYNCED:
+          System.out.println("Initial Sync Skipped");
+          break;
+        case INITIALLY_SYNCED:
+          System.out.println("Initial Sync Done");
+          break;
+        case SYNCING:
+          System.out.println("Initial Sync In Progress");
+          break;
+        default:
+          System.out.println("Invalid Syncing Status");
+      }
     }
     return 0;
   }

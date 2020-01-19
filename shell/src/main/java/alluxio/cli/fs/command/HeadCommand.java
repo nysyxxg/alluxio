@@ -13,11 +13,11 @@ package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
 import alluxio.Constants;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
 import alluxio.client.file.FileInStream;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.URIStatus;
-import alluxio.client.file.options.OpenFileOptions;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.status.InvalidArgumentException;
@@ -36,6 +36,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * Prints the file's first n bytes (by default, 1KB) to the console.
  */
 @ThreadSafe
+@PublicApi
 public final class HeadCommand extends AbstractFileSystemCommand {
   private static final Option BYTES_OPTION = Option.builder("c")
       .required(false)
@@ -46,10 +47,10 @@ public final class HeadCommand extends AbstractFileSystemCommand {
   private int mNumOfBytes;
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public HeadCommand(FileSystem fs) {
-    super(fs);
+  public HeadCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -70,8 +71,7 @@ public final class HeadCommand extends AbstractFileSystemCommand {
     if (status.isFolder()) {
       throw new IOException(ExceptionMessage.PATH_MUST_BE_FILE.getMessage(plainPath));
     }
-    OpenFileOptions options = OpenFileOptions.defaults();
-    try (FileInStream is = mFileSystem.openFile(plainPath, options)) {
+    try (FileInStream is = mFileSystem.openFile(plainPath)) {
       long bytesToRead;
       if (status.getLength() > mNumOfBytes) {
         bytesToRead = mNumOfBytes;

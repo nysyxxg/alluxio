@@ -12,13 +12,14 @@
 package alluxio.master.file.meta;
 
 import alluxio.ProcessUtils;
-import alluxio.collections.ConcurrentHashSet;
-import alluxio.collections.FieldIndex;
-import alluxio.collections.IndexDefinition;
-import alluxio.collections.UniqueFieldIndex;
-import alluxio.master.file.state.InodesView;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
 import alluxio.master.journal.JournalContext;
-import alluxio.master.journal.JournalEntryReplayable;
+import alluxio.master.journal.JournalUtils;
+import alluxio.master.journal.Journaled;
+import alluxio.master.journal.checkpoint.CheckpointInputStream;
+import alluxio.master.journal.checkpoint.CheckpointName;
+import alluxio.master.metastore.InodeStore;
 import alluxio.proto.journal.File.AsyncPersistRequestEntry;
 import alluxio.proto.journal.File.CompleteFileEntry;
 import alluxio.proto.journal.File.DeleteFileEntry;
@@ -27,7 +28,6 @@ import alluxio.proto.journal.File.InodeFileEntry;
 import alluxio.proto.journal.File.InodeLastModificationTimeEntry;
 import alluxio.proto.journal.File.NewBlockEntry;
 import alluxio.proto.journal.File.PersistDirectoryEntry;
-import alluxio.proto.journal.File.ReinitializeFileEntry;
 import alluxio.proto.journal.File.RenameEntry;
 import alluxio.proto.journal.File.SetAclEntry;
 import alluxio.proto.journal.File.SetAttributeEntry;
@@ -36,45 +36,43 @@ import alluxio.proto.journal.File.UpdateInodeEntry;
 import alluxio.proto.journal.File.UpdateInodeEntry.Builder;
 import alluxio.proto.journal.File.UpdateInodeFileEntry;
 import alluxio.proto.journal.Journal.JournalEntry;
+import alluxio.resource.LockResource;
 import alluxio.security.authorization.AclEntry;
 import alluxio.security.authorization.DefaultAccessControlList;
 import alluxio.util.StreamUtils;
+import alluxio.util.proto.ProtoUtils;
 
 import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 import java.util.function.Supplier;
 
 /**
- * Class for managing peristent inode tree state.
+ * Class for managing persistent inode tree state.
  *
  * This class owns all persistent inode tree state, and all inode tree modifications must go through
- * this class. The getInodesView and getRoot methods expose unmodifiable views of the inode tree.
- * To modify the inode tree, create a journal entry and call one of the applyAndJournal methods.
+ * this class. To modify the inode tree, create a journal entry and call one of the applyAndJournal
+ * methods.
  */
-public class InodeTreePersistentState implements JournalEntryReplayable {
+public class InodeTreePersistentState implements Journaled {
   private static final Logger LOG = LoggerFactory.getLogger(InodeTreePersistentState.class);
 
-  private static final IndexDefinition<Inode<?>, Long> ID_INDEX =
-      new IndexDefinition<Inode<?>, Long>(true) {
-        @Override
-        public Long getFieldValue(Inode<?> o) {
-          return o.getId();
-        }
-      };
-
-  /** All inodes, indexed by ID. */
-  private final FieldIndex<Inode<?>, Long> mInodes = new UniqueFieldIndex<>(ID_INDEX);
-  /** The root of the entire file system. */
-  private InodeDirectory mRoot = null;
+  private final InodeStore mInodeStore;
+  private final InodeLockManager mInodeLockManager;
 
   /**
    * A set of inode ids representing pinned inode files. These are not part of the journaled state,
@@ -82,10 +80,37 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
    *
    * This class owns this set, and no other class can modify the set.
    */
-  private final Set<Long> mPinnedInodeFileIds = new ConcurrentHashSet<>(64, 0.90f, 64);
+  private final PinnedInodeFileIds mPinnedInodeFileIds = new PinnedInodeFileIds();
 
   /** A set of inode ids whose replication max value is non-default. */
-  private final Set<Long> mReplicationLimitedFileIds = new ConcurrentHashSet<>(64, 0.90f, 64);
+  private final ReplicationLimitedFileIds mReplicationLimitedFileIds =
+      new ReplicationLimitedFileIds();
+
+  /** Counter for tracking how many inodes we have. */
+  private final InodeCounter mInodeCounter = new InodeCounter();
+
+  /** A set of inode ids whose persistence state is {@link PersistenceState#TO_BE_PERSISTED}. */
+  private final ToBePersistedFileIds mToBePersistedIds = new ToBePersistedFileIds();
+
+  /**
+   * TTL bucket list. The list is owned by InodeTree, and is only shared with
+   * InodeTreePersistentState so that the list can be updated whenever inode tree state changes.
+   */
+  // TODO(andrew): Move ownership of the ttl bucket list to this class
+  private final TtlBucketList mTtlBuckets;
+
+  /**
+   * @param inodeStore file store which holds inode metadata
+   * @param lockManager manager for inode locks
+   * @param ttlBucketList reference to the ttl bucket list so that the list can be updated when the
+   *        inode tree is modified
+   */
+  public InodeTreePersistentState(InodeStore inodeStore, InodeLockManager lockManager,
+      TtlBucketList ttlBucketList) {
+    mInodeStore = inodeStore;
+    mInodeLockManager = lockManager;
+    mTtlBuckets = ttlBucketList;
+  }
 
   /**
    * @return an unmodifiable view of the replication limited file ids
@@ -95,35 +120,10 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
   }
 
   /**
-   * TTL bucket list. The list is owned by InodeTree, and is only shared with
-   * InodeTreePersistentState so that the list can be updated whenever inode tree state changes.
-   */
-  // TODO(andrew): Move ownership of the ttl bucket list to this class
-  private final TtlBucketList mTtlBuckets;
-
-  /** Unmodifiable view of mInodes. */
-  private final InodesView mInodesView = new InodesView(mInodes);
-
-  /**
-   * @param ttlBucketList reference to the ttl bucket list so that the list can be updated when the
-   *        inode tree is modified
-   */
-  public InodeTreePersistentState(TtlBucketList ttlBucketList) {
-    mTtlBuckets = ttlBucketList;
-  }
-
-  /**
-   * @return the inodes of the inode tree, indexed by id
-   */
-  public InodesView getInodesView() {
-    return mInodesView;
-  }
-
-  /**
    * @return the root of the inode tree
    */
-  public InodeDirectoryView getRoot() {
-    return mRoot;
+  public InodeDirectory getRoot() {
+    return mInodeStore.get(0).map(Inode::asDirectory).orElse(null);
   }
 
   /**
@@ -134,48 +134,18 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
   }
 
   /**
-   * Applies a journal entry to the inode tree state. This method should only be used during journal
-   * replay. Otherwise, use one of the applyAndJournal methods.
-   *
-   * @param entry the entry
-   * @return whether the journal entry was of a type recognized by the inode tree
+   * @return the number of inodes in the tree
    */
-  public boolean replayJournalEntryFromJournal(JournalEntry entry) {
-    if (entry.hasDeleteFile()) {
-      apply(entry.getDeleteFile());
-    } else if (entry.hasInodeDirectory()) {
-      apply(entry.getInodeDirectory());
-    } else if (entry.hasInodeFile()) {
-      apply(entry.getInodeFile());
-    } else if (entry.hasNewBlock()) {
-      apply(entry.getNewBlock());
-    } else if (entry.hasRename()) {
-      apply(entry.getRename());
-    } else if (entry.hasSetAcl()) {
-      apply(entry.getSetAcl());
-    } else if (entry.hasUpdateInode()) {
-      apply(entry.getUpdateInode());
-    } else if (entry.hasUpdateInodeDirectory()) {
-      apply(entry.getUpdateInodeDirectory());
-    } else if (entry.hasUpdateInodeFile()) {
-      apply(entry.getUpdateInodeFile());
-      // Deprecated entries
-    } else if (entry.hasAsyncPersistRequest()) {
-      apply(entry.getAsyncPersistRequest());
-    } else if (entry.hasCompleteFile()) {
-      apply(entry.getCompleteFile());
-    } else if (entry.hasInodeLastModificationTime()) {
-      apply(entry.getInodeLastModificationTime());
-    } else if (entry.hasPersistDirectory()) {
-      apply(entry.getPersistDirectory());
-    } else if (entry.hasReinitializeFile()) {
-      apply(entry.getReinitializeFile());
-    } else if (entry.hasSetAttribute()) {
-      apply(entry.getSetAttribute());
-    } else {
-      return false;
-    }
-    return true;
+  public long getInodeCount() {
+    return mInodeCounter.get();
+  }
+
+  /**
+   * @return an unmodifiable view of the files with persistence state
+   *         {@link PersistenceState#TO_BE_PERSISTED}
+   */
+  public Set<Long> getToBePersistedIds() {
+    return Collections.unmodifiableSet(mToBePersistedIds);
   }
 
   /**
@@ -195,7 +165,7 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
     // operation holds that lock until after it has appended to the journal.
     try {
       context.get().append(JournalEntry.newBuilder().setDeleteFile(entry).build());
-      apply(entry);
+      applyDelete(entry);
     } catch (Throwable t) {
       // Delete entries should always apply cleanly, but if it somehow fails, we are in a state
       // where we've journaled the delete, but failed to make the in-memory update. We don't yet
@@ -213,7 +183,7 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
    */
   public long applyAndJournal(Supplier<JournalContext> context, NewBlockEntry entry) {
     try {
-      long id = apply(entry);
+      long id = applyNewBlock(entry);
       context.get().append(JournalEntry.newBuilder().setNewBlock(entry).build());
       return id;
     } catch (Throwable t) {
@@ -227,17 +197,11 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
    *
    * @param context journal context supplier
    * @param entry rename entry
-   * @return whether the inode was successfully renamed. Returns false if another inode was
-   *         concurrently added with the same name. On false return, no state is changed,
-   *         and no journal entry is written
    */
-  public boolean applyAndJournal(Supplier<JournalContext> context, RenameEntry entry) {
+  public void applyAndJournal(Supplier<JournalContext> context, RenameEntry entry) {
     try {
-      if (applyRename(entry)) {
-        context.get().append(JournalEntry.newBuilder().setRename(entry).build());
-        return true;
-      }
-      return false;
+      applyRename(entry);
+      context.get().append(JournalEntry.newBuilder().setRename(entry).build());
     } catch (Throwable t) {
       ProcessUtils.fatalError(LOG, t, "Failed to apply %s", entry);
       throw t; // fatalError will usually system.exit
@@ -252,7 +216,7 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
    */
   public void applyAndJournal(Supplier<JournalContext> context, SetAclEntry entry) {
     try {
-      apply(entry);
+      applySetAcl(entry);
       context.get().append(JournalEntry.newBuilder().setSetAcl(entry).build());
     } catch (Throwable t) {
       ProcessUtils.fatalError(LOG, t, "Failed to apply %s", entry);
@@ -268,7 +232,7 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
    */
   public void applyAndJournal(Supplier<JournalContext> context, UpdateInodeEntry entry) {
     try {
-      apply(entry);
+      applyUpdateInode(entry);
       context.get().append(JournalEntry.newBuilder().setUpdateInode(entry).build());
     } catch (Throwable t) {
       ProcessUtils.fatalError(LOG, t, "Failed to apply %s", entry);
@@ -284,7 +248,7 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
    */
   public void applyAndJournal(Supplier<JournalContext> context, UpdateInodeDirectoryEntry entry) {
     try {
-      apply(entry);
+      applyUpdateInodeDirectory(entry);
       context.get().append(JournalEntry.newBuilder().setUpdateInodeDirectory(entry).build());
     } catch (Throwable t) {
       ProcessUtils.fatalError(LOG, t, "Failed to apply %s", entry);
@@ -300,7 +264,7 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
    */
   public void applyAndJournal(Supplier<JournalContext> context, UpdateInodeFileEntry entry) {
     try {
-      apply(entry);
+      applyUpdateInodeFile(entry);
       context.get().append(JournalEntry.newBuilder().setUpdateInodeFile(entry).build());
     } catch (Throwable t) {
       ProcessUtils.fatalError(LOG, t, "Failed to apply %s", entry);
@@ -313,21 +277,33 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
    *
    * @param context journal context supplier
    * @param inode an inode to add and create a journal entry for
-   * @return whether the inode was successfully added. Returns false if another inode was
-   *         concurrently added with the same name. On false return, no state is changed,
-   *         and no journal entry is written
+   * @param path path of the new inode
    */
-  public boolean applyAndJournal(Supplier<JournalContext> context, Inode<?> inode) {
+  public void applyAndJournal(Supplier<JournalContext> context, MutableInode<?> inode,
+      String path) {
     try {
-      if (applyInode(inode)) {
-        context.get().append(inode.toJournalEntry());
-        return true;
-      }
-      return false;
+      applyCreateInode(inode);
+      context.get().append(inode.toJournalEntry(
+          Preconditions.checkNotNull(path)));
     } catch (Throwable t) {
       ProcessUtils.fatalError(LOG, t, "Failed to apply %s", inode);
       throw t; // fatalError will usually system.exit
     }
+  }
+
+  /**
+   * Updates last access time for Inode without journaling. The caller should apply the journal
+   * entry separately.
+   *
+   * @param inodeId the id of the target inode
+   * @param accessTime the new value for last access time
+   * @return the journal entry that represents the update
+   */
+  public UpdateInodeEntry applyInodeAccessTime(long inodeId, long accessTime) {
+    UpdateInodeEntry entry = UpdateInodeEntry.newBuilder().setId(inodeId)
+        .setLastAccessTimeMs(accessTime).build();
+    applyUpdateInode(entry);
+    return entry;
   }
 
   ////
@@ -335,60 +311,57 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
   /// fail. They are also used when making metadata changes during regular operation.
   ////
 
-  private void apply(DeleteFileEntry entry) {
+  private void applyDelete(DeleteFileEntry entry) {
     long id = entry.getId();
-    Inode<?> inode = mInodes.getFirst(id);
-    InodeDirectory parent = (InodeDirectory) mInodes.getFirst(inode.getParentId());
-    mInodes.remove(inode);
-    parent.removeChild(inode);
-    parent.setLastModificationTimeMs(entry.getOpTimeMs());
-    inode.setDeleted(true);
-    mPinnedInodeFileIds.remove(id);
-    mReplicationLimitedFileIds.remove(id);
+    Inode inode = mInodeStore.get(id).get();
 
     // The recursive option is only used by old versions.
     if (inode.isDirectory() && entry.getRecursive()) {
       Queue<InodeDirectory> dirsToDelete = new ArrayDeque<>();
-      dirsToDelete.add((InodeDirectory) inode);
+      dirsToDelete.add(inode.asDirectory());
       while (!dirsToDelete.isEmpty()) {
         InodeDirectory dir = dirsToDelete.poll();
-        mInodes.remove(dir);
-        for (InodeView child : dir.getChildren()) {
+        mInodeStore.removeInodeAndParentEdge(inode);
+        mInodeCounter.decrementAndGet();
+        for (Inode child : mInodeStore.getChildren(dir)) {
           if (child.isDirectory()) {
-            dirsToDelete.add((InodeDirectory) child);
+            dirsToDelete.add(child.asDirectory());
           } else {
-            mInodes.remove((Inode<?>) child);
+            mInodeStore.removeInodeAndParentEdge(inode);
+            mInodeCounter.decrementAndGet();
           }
         }
       }
+    } else {
+      mInodeStore.removeInodeAndParentEdge(inode);
+      mInodeCounter.decrementAndGet();
     }
+
+    updateTimestampsAndChildCount(inode.getParentId(), entry.getOpTimeMs(), -1);
+    mPinnedInodeFileIds.remove(id);
+    mReplicationLimitedFileIds.remove(id);
+    mToBePersistedIds.remove(id);
+    mTtlBuckets.remove(inode);
   }
 
-  private void apply(InodeDirectoryEntry entry) {
-    Preconditions.checkState(applyInode(InodeDirectory.fromJournalEntry(entry)));
+  private void applyCreateDirectory(InodeDirectoryEntry entry) {
+    applyCreateInode(MutableInodeDirectory.fromJournalEntry(entry));
   }
 
-  private void apply(InodeFileEntry entry) {
-    if (!applyInode(InodeFile.fromJournalEntry(entry))) {
-      throw new RuntimeException("Failed to apply " + entry);
-    }
+  private void applyCreateFile(InodeFileEntry entry) {
+    applyCreateInode(MutableInodeFile.fromJournalEntry(entry));
   }
 
-  private long apply(NewBlockEntry entry) {
-    InodeFile inode = (InodeFile) mInodes.getFirst(entry.getId());
-    return inode.getNewBlockId();
+  private long applyNewBlock(NewBlockEntry entry) {
+    MutableInodeFile inode = mInodeStore.getMutable(entry.getId()).get().asFile();
+    long newBlockId = inode.getNewBlockId();
+    mInodeStore.writeInode(inode);
+    return newBlockId;
   }
 
-  private void apply(RenameEntry entry) {
-    if (entry.hasDstPath()) {
-      entry = rewriteDeprecatedRenameEntry(entry);
-    }
-    Preconditions.checkState(applyRename(entry));
-  }
-
-  private void apply(SetAclEntry entry) {
-    Inode<?> inode = mInodes.getFirst(entry.getId());
-    List<AclEntry> entries = StreamUtils.map(AclEntry::fromProto, entry.getEntriesList());
+  private void applySetAcl(SetAclEntry entry) {
+    MutableInode<?> inode = mInodeStore.getMutable(entry.getId()).get();
+    List<AclEntry> entries = StreamUtils.map(ProtoUtils::fromProto, entry.getEntriesList());
     switch (entry.getAction()) {
       case REPLACE:
         // fully replace the acl for the path
@@ -407,11 +380,21 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
         inode.setDefaultACL(new DefaultAccessControlList(inode.getACL()));
         break;
       default:
+        LOG.warn("Unrecognized acl action: " + entry.getAction());
     }
+    mInodeStore.writeInode(inode);
   }
 
-  private void apply(UpdateInodeEntry entry) {
-    Inode<?> inode = mInodes.getFirst(entry.getId());
+  private void applyUpdateInode(UpdateInodeEntry entry) {
+    Optional<MutableInode<?>> inodeOpt = mInodeStore.getMutable(entry.getId());
+    if (!inodeOpt.isPresent()) {
+      if (isJournalUpdateAsync(entry)) {
+        // do not throw if the entry is journaled asynchronously
+        return;
+      }
+      throw new IllegalStateException("Inode " + entry.getId() + " not found");
+    }
+    MutableInode<?> inode = inodeOpt.get();
     if (entry.hasTtl()) {
       // Remove before updating the inode. #remove relies on the inode having the same
       // TTL as when it was inserted.
@@ -419,11 +402,23 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
     }
     inode.updateFromEntry(entry);
     if (entry.hasTtl()) {
-      mTtlBuckets.insert(inode);
+      mTtlBuckets.insert(Inode.wrap(inode));
     }
     if (entry.hasPinned() && inode.isFile()) {
       if (entry.getPinned()) {
-        InodeFile file = (InodeFile) inode;
+        MutableInodeFile file = inode.asFile();
+        List<String> mediaList = ServerConfiguration.getList(
+            PropertyKey.MASTER_TIERED_STORE_GLOBAL_MEDIUMTYPE, ",");
+        if (entry.getMediumTypeList().isEmpty()) {
+          // if user does not specify a pinned media list, any location is OK
+          file.setMediumTypes(new HashSet<>());
+        } else {
+          for (String medium : entry.getMediumTypeList()) {
+            if (mediaList.contains(medium)) {
+              file.getMediumTypes().add(medium);
+            }
+          }
+        }
         // when we pin a file with default min replication (zero), we bump the min replication
         // to one in addition to setting pinned flag, and adjust the max replication if it is
         // smaller than min replication.
@@ -436,25 +431,35 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
         mPinnedInodeFileIds.add(entry.getId());
       } else {
         // when we unpin a file, set the min replication to zero too.
-        ((InodeFile) inode).setReplicationMin(0);
+        inode.asFile().setReplicationMin(0);
         mPinnedInodeFileIds.remove(entry.getId());
       }
     }
+    mInodeStore.writeInode(inode);
+    updateToBePersistedIds(inode);
   }
 
-  private void apply(UpdateInodeDirectoryEntry entry) {
-    Inode<?> inode = mInodes.getFirst(entry.getId());
+  /**
+   * @param entry the update inode journal entry to be checked
+   * @return whether the journal entry might be applied asynchronously out of order
+   */
+  private boolean isJournalUpdateAsync(UpdateInodeEntry entry) {
+    return entry.getAllFields().size() == 2 && entry.hasId() && entry.hasLastAccessTimeMs();
+  }
+
+  private void applyUpdateInodeDirectory(UpdateInodeDirectoryEntry entry) {
+    MutableInode<?> inode = mInodeStore.getMutable(entry.getId()).get();
     Preconditions.checkState(inode.isDirectory(),
         "Encountered non-directory id in update directory entry %s", entry);
-    InodeDirectory dir = (InodeDirectory) inode;
 
-    dir.updateFromEntry(entry);
+    inode.asDirectory().updateFromEntry(entry);
+    mInodeStore.writeInode(inode);
   }
 
-  private void apply(UpdateInodeFileEntry entry) {
-    Inode<?> inode = mInodes.getFirst(entry.getId());
-    Preconditions.checkState(inode.isFile(),
-        "Encountered non-file id in update file entry %s", entry);
+  private void applyUpdateInodeFile(UpdateInodeFileEntry entry) {
+    MutableInode<?> inode = mInodeStore.getMutable(entry.getId()).get();
+    Preconditions.checkState(inode.isFile(), "Encountered non-file id in update file entry %s",
+        entry);
     if (entry.hasReplicationMax()) {
       if (entry.getReplicationMax() == alluxio.Constants.REPLICATION_MAX_INFINITY) {
         mReplicationLimitedFileIds.remove(inode.getId());
@@ -462,57 +467,40 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
         mReplicationLimitedFileIds.add(inode.getId());
       }
     }
-    InodeFile file = (InodeFile) inode;
-
-    file.updateFromEntry(entry);
+    inode.asFile().updateFromEntry(entry);
+    mInodeStore.writeInode(inode);
   }
 
   ////
   /// Deprecated Entries
   ////
 
-  private void apply(AsyncPersistRequestEntry entry) {
-    apply(UpdateInodeEntry.newBuilder()
-        .setId(entry.getFileId())
-        .setPersistenceState(PersistenceState.TO_BE_PERSISTED.name())
-        .build());
+  private void applyAsyncPersist(AsyncPersistRequestEntry entry) {
+    applyUpdateInode(UpdateInodeEntry.newBuilder().setId(entry.getFileId())
+        .setPersistenceState(PersistenceState.TO_BE_PERSISTED.name()).build());
   }
 
-  private void apply(CompleteFileEntry entry) {
-    apply(UpdateInodeEntry.newBuilder()
-        .setId(entry.getId())
-        .setLastModificationTimeMs(entry.getOpTimeMs())
-        .setOverwriteModificationTime(true)
-        .setUfsFingerprint(entry.getUfsFingerprint())
-        .build());
-    apply(UpdateInodeFileEntry.newBuilder()
-        .setId(entry.getId())
-        .setLength(entry.getLength())
-        .addAllSetBlocks(entry.getBlockIdsList())
-        .build());
+  private void applyCompleteFile(CompleteFileEntry entry) {
+    applyUpdateInode(UpdateInodeEntry.newBuilder().setId(entry.getId())
+        .setLastModificationTimeMs(entry.getOpTimeMs()).setOverwriteModificationTime(true)
+        .setUfsFingerprint(entry.getUfsFingerprint()).build());
+    applyUpdateInodeFile(UpdateInodeFileEntry.newBuilder().setId(entry.getId())
+        .setLength(entry.getLength()).addAllSetBlocks(entry.getBlockIdsList()).build());
   }
 
-  private void apply(InodeLastModificationTimeEntry entry) {
+  private void applyInodeLastModificationTime(InodeLastModificationTimeEntry entry) {
     // This entry is deprecated, use UpdateInode instead.
-    apply(UpdateInodeEntry.newBuilder()
-        .setId(entry.getId())
-        .setLastModificationTimeMs(entry.getLastModificationTimeMs())
-        .build());
+    applyUpdateInode(UpdateInodeEntry.newBuilder().setId(entry.getId())
+        .setLastModificationTimeMs(entry.getLastModificationTimeMs()).build());
   }
 
-  private void apply(PersistDirectoryEntry entry) {
+  private void applyPersistDirectory(PersistDirectoryEntry entry) {
     // This entry is deprecated, use UpdateInode instead.
-    apply(UpdateInodeEntry.newBuilder()
-        .setId(entry.getId())
-        .setPersistenceState(PersistenceState.PERSISTED.name())
-        .build());
+    applyUpdateInode(UpdateInodeEntry.newBuilder().setId(entry.getId())
+        .setPersistenceState(PersistenceState.PERSISTED.name()).build());
   }
 
-  private void apply(ReinitializeFileEntry entry) {
-    throw new UnsupportedOperationException("Lineage is not currently supported");
-  }
-
-  private void apply(SetAttributeEntry entry) {
+  private void applySetAttribute(SetAttributeEntry entry) {
     Builder builder = UpdateInodeEntry.newBuilder();
     builder.setId(entry.getId());
     if (entry.hasGroup()) {
@@ -544,34 +532,35 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
     if (entry.hasUfsFingerprint()) {
       builder.setUfsFingerprint(entry.getUfsFingerprint());
     }
-    apply(builder.build());
+    applyUpdateInode(builder.build());
   }
 
   ////
   // Helper methods
   ////
 
-  private boolean applyInode(Inode<?> inode) {
+  private void applyCreateInode(MutableInode<?> inode) {
     if (inode.isDirectory() && inode.getName().equals(InodeTree.ROOT_INODE_NAME)) {
       // This is the root inode. Clear all the state, and set the root.
-      mInodes.clear();
-      mInodes.add(inode);
+      mInodeStore.clear();
+      mInodeStore.writeNewInode(inode);
+      mInodeCounter.set(1);
       mPinnedInodeFileIds.clear();
-      mRoot = (InodeDirectory) inode;
-      return true;
+      mReplicationLimitedFileIds.clear();
+      mToBePersistedIds.clear();
+
+      updateToBePersistedIds(inode);
+      return;
     }
-    // inode should be added to mInodes before getting added to its parent list, because it
+    // inode should be added to the inode store before getting added to its parent list, because it
     // becomes visible at this point.
-    mInodes.add(inode);
-    InodeDirectory parent = (InodeDirectory) mInodes.getFirst(inode.getParentId());
-    if (!parent.addChild(inode)) {
-      LOG.debug("Failed to add inode {} because another inode with the same name already exists",
-          inode.getName());
-      mInodes.remove(inode);
-      return false;
-    }
+    mInodeStore.writeNewInode(inode);
+    mInodeCounter.incrementAndGet();
+    mInodeStore.addChild(inode.getParentId(), inode);
+    // Only update size, last modified time is updated separately.
+    updateTimestampsAndChildCount(inode.getParentId(), Long.MIN_VALUE, 1);
     if (inode.isFile()) {
-      InodeFile file = (InodeFile) inode;
+      MutableInodeFile file = inode.asFile();
       if (file.getReplicationMin() > 0) {
         mPinnedInodeFileIds.add(file.getId());
         file.setPinned(true);
@@ -585,30 +574,72 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
       mPinnedInodeFileIds.add(inode.getId());
     }
     // Add the file to TTL buckets, the insert automatically rejects files w/ Constants.NO_TTL
-    mTtlBuckets.insert(inode);
-    return true;
+    mTtlBuckets.insert(Inode.wrap(inode));
+    updateToBePersistedIds(inode);
   }
 
-  private boolean applyRename(RenameEntry entry) {
-    Inode<?> inode = mInodes.getFirst(entry.getId());
-    String oldName = inode.getName();
-    InodeDirectory parent = (InodeDirectory) mInodes.getFirst(inode.getParentId());
-    parent.removeChild(inode);
-
-    inode.setName(entry.getNewName());
-    InodeDirectory newParent = (InodeDirectory) mInodes.getFirst(entry.getNewParentId());
-    if (!newParent.addChild(inode)) {
-      // Parents index their children by name, so we need to update the name before adding/removing.
-      // In the future, we should consider indexing by ID instead to simplify this code and also
-      // save memory.
-      inode.setName(oldName);
-      parent.addChild(inode);
-      return false;
+  private void applyRename(RenameEntry entry) {
+    if (entry.hasDstPath()) {
+      entry = rewriteDeprecatedRenameEntry(entry);
     }
-    inode.setParentId(entry.getNewParentId());
-    parent.setLastModificationTimeMs(entry.getOpTimeMs());
-    newParent.setLastModificationTimeMs(entry.getOpTimeMs());
-    return true;
+
+    MutableInode<?> inode = mInodeStore.getMutable(entry.getId()).get();
+    long oldParent = inode.getParentId();
+    long newParent = entry.getNewParentId();
+
+    mInodeStore.removeChild(oldParent, inode.getName());
+    inode.setName(entry.getNewName());
+    mInodeStore.addChild(newParent, inode);
+    inode.setParentId(newParent);
+    mInodeStore.writeInode(inode);
+
+    if (oldParent == newParent) {
+      updateTimestampsAndChildCount(oldParent, entry.getOpTimeMs(), 0);
+    } else {
+      updateTimestampsAndChildCount(oldParent, entry.getOpTimeMs(), -1);
+      updateTimestampsAndChildCount(newParent, entry.getOpTimeMs(), 1);
+    }
+  }
+
+  /**
+   * Updates the last modification time and last access time for the indicated inode directory,
+   * and updates its child count.
+   *
+   * If the inode's timestamps are already greater than the specified time, the inode's timestamps
+   * will not be changed.
+   *
+   * @param id the inode to update
+   * @param opTimeMs the time of the operation that modified the inode
+   * @param deltaChildCount the change in inode directory child count
+   */
+  private void updateTimestampsAndChildCount(long id, long opTimeMs, long deltaChildCount) {
+    try (LockResource lr = mInodeLockManager.lockUpdate(id)) {
+      MutableInodeDirectory inode = mInodeStore.getMutable(id).get().asDirectory();
+      boolean madeUpdate = false;
+      if (inode.getLastModificationTimeMs() < opTimeMs) {
+        inode.setLastModificationTimeMs(opTimeMs);
+        madeUpdate = true;
+      }
+      if (inode.getLastAccessTimeMs() < opTimeMs) {
+        inode.setLastAccessTimeMs(opTimeMs);
+        madeUpdate = true;
+      }
+      if (deltaChildCount != 0) {
+        inode.setChildCount(inode.getChildCount() + deltaChildCount);
+        madeUpdate = true;
+      }
+      if (madeUpdate) {
+        mInodeStore.writeInode(inode);
+      }
+    }
+  }
+
+  private void updateToBePersistedIds(MutableInode<?> inode) {
+    if (inode.getPersistenceState() == PersistenceState.TO_BE_PERSISTED) {
+      mToBePersistedIds.add(inode.getId());
+    } else {
+      mToBePersistedIds.remove(inode.getId());
+    }
   }
 
   private RenameEntry rewriteDeprecatedRenameEntry(RenameEntry entry) {
@@ -617,29 +648,96 @@ public class InodeTreePersistentState implements JournalEntryReplayable {
     Preconditions.checkState(!entry.hasNewParentId(),
         "old-style rename entries should not have the newParentId field set");
     Path path = Paths.get(entry.getDstPath());
-    return RenameEntry.newBuilder()
-        .setId(entry.getId())
-        .setNewParentId(getIdFromPath(path.getParent()))
-        .setNewName(path.getFileName().toString())
-        .setOpTimeMs(entry.getOpTimeMs())
-        .build();
+    Path parent = path.getParent();
+    Path filename = path.getFileName();
+    if (parent == null) {
+      throw new NullPointerException("path parent cannot be null");
+    }
+    if (filename == null) {
+      throw new NullPointerException("path filename cannot be null");
+    }
+
+    return RenameEntry.newBuilder().setId(entry.getId())
+        .setNewParentId(getIdFromPath(parent))
+        .setNewName(filename.toString())
+        .setOpTimeMs(entry.getOpTimeMs()).build();
   }
 
   private long getIdFromPath(Path path) {
-    InodeView curr = mRoot;
+    Inode curr = getRoot();
     for (Path component : path) {
-      curr = ((InodeDirectoryView) curr).getChild(component.toString());
+      curr = mInodeStore.getChild(curr.asDirectory(), component.toString()).get();
     }
     return curr.getId();
   }
 
-  /**
-   * Resets the inode tree state.
-   */
-  public void reset() {
-    mRoot = null;
-    mInodes.clear();
+  @Override
+  public boolean processJournalEntry(JournalEntry entry) {
+    if (entry.hasDeleteFile()) {
+      applyDelete(entry.getDeleteFile());
+    } else if (entry.hasInodeDirectory()) {
+      applyCreateDirectory(entry.getInodeDirectory());
+    } else if (entry.hasInodeFile()) {
+      applyCreateFile(entry.getInodeFile());
+    } else if (entry.hasNewBlock()) {
+      applyNewBlock(entry.getNewBlock());
+    } else if (entry.hasRename()) {
+      applyRename(entry.getRename());
+    } else if (entry.hasSetAcl()) {
+      applySetAcl(entry.getSetAcl());
+    } else if (entry.hasUpdateInode()) {
+      applyUpdateInode(entry.getUpdateInode());
+    } else if (entry.hasUpdateInodeDirectory()) {
+      applyUpdateInodeDirectory(entry.getUpdateInodeDirectory());
+    } else if (entry.hasUpdateInodeFile()) {
+      applyUpdateInodeFile(entry.getUpdateInodeFile());
+      // Deprecated entries
+    } else if (entry.hasAsyncPersistRequest()) {
+      applyAsyncPersist(entry.getAsyncPersistRequest());
+    } else if (entry.hasCompleteFile()) {
+      applyCompleteFile(entry.getCompleteFile());
+    } else if (entry.hasInodeLastModificationTime()) {
+      applyInodeLastModificationTime(entry.getInodeLastModificationTime());
+    } else if (entry.hasPersistDirectory()) {
+      applyPersistDirectory(entry.getPersistDirectory());
+    } else if (entry.hasSetAttribute()) {
+      applySetAttribute(entry.getSetAttribute());
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  @Override
+  public void resetState() {
+    mInodeStore.clear();
     mReplicationLimitedFileIds.clear();
     mPinnedInodeFileIds.clear();
+  }
+
+  @Override
+  public void writeToCheckpoint(OutputStream output) throws IOException, InterruptedException {
+    // mTtlBuckets must come after mInodeStore so that it can query the inode store to resolve inode
+    // ids to inodes.
+    JournalUtils.writeToCheckpoint(output, Arrays.asList(mInodeStore, mPinnedInodeFileIds,
+        mReplicationLimitedFileIds, mToBePersistedIds, mTtlBuckets, mInodeCounter));
+  }
+
+  @Override
+  public void restoreFromCheckpoint(CheckpointInputStream input) throws IOException {
+    // mTtlBuckets must come after mInodeStore so that it can query the inode store to resolve inode
+    // ids to inodes.
+    JournalUtils.restoreFromCheckpoint(input, Arrays.asList(mInodeStore, mPinnedInodeFileIds,
+        mReplicationLimitedFileIds, mToBePersistedIds, mTtlBuckets, mInodeCounter));
+  }
+
+  @Override
+  public Iterator<JournalEntry> getJournalEntryIterator() {
+    return new InodeTreeBufferedIterator(mInodeStore, getRoot());
+  }
+
+  @Override
+  public CheckpointName getCheckpointName() {
+    return CheckpointName.INODE_TREE;
   }
 }

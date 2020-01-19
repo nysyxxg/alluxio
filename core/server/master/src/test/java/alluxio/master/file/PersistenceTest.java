@@ -11,48 +11,56 @@
 
 package alluxio.master.file;
 
+import static org.mockito.Matchers.any;
+
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
-import alluxio.ConfigurationTestUtils;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.client.WriteType;
 import alluxio.client.job.JobMasterClient;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
 import alluxio.exception.AccessControlException;
 import alluxio.exception.FileDoesNotExistException;
 import alluxio.exception.InvalidPathException;
+import alluxio.grpc.CreateFilePOptions;
+import alluxio.grpc.DeletePOptions;
 import alluxio.heartbeat.HeartbeatContext;
 import alluxio.heartbeat.HeartbeatScheduler;
 import alluxio.heartbeat.ManuallyScheduleHeartbeat;
 import alluxio.job.JobConfig;
 import alluxio.job.wire.JobInfo;
+import alluxio.job.wire.PlanInfo;
 import alluxio.job.wire.Status;
+import alluxio.master.CoreMasterContext;
 import alluxio.master.DefaultSafeModeManager;
-import alluxio.master.MasterContext;
 import alluxio.master.MasterRegistry;
 import alluxio.master.MasterTestUtils;
 import alluxio.master.SafeModeManager;
 import alluxio.master.block.BlockMasterFactory;
+import alluxio.master.file.contexts.CompleteFileContext;
+import alluxio.master.file.contexts.CreateDirectoryContext;
+import alluxio.master.file.contexts.CreateFileContext;
+import alluxio.master.file.contexts.DeleteContext;
+import alluxio.master.file.contexts.GetStatusContext;
+import alluxio.master.file.contexts.RenameContext;
+import alluxio.master.file.contexts.ScheduleAsyncPersistenceContext;
 import alluxio.master.file.meta.PersistenceState;
-import alluxio.master.file.options.CompleteFileOptions;
-import alluxio.master.file.options.CreateDirectoryOptions;
-import alluxio.master.file.options.CreateFileOptions;
-import alluxio.master.file.options.DeleteOptions;
-import alluxio.master.file.options.GetStatusOptions;
-import alluxio.master.file.options.RenameOptions;
 import alluxio.master.journal.JournalSystem;
 import alluxio.master.journal.JournalTestUtils;
+import alluxio.master.journal.JournalType;
 import alluxio.master.metrics.MetricsMasterFactory;
-import alluxio.security.LoginUser;
 import alluxio.security.authentication.AuthenticatedClientUser;
 import alluxio.security.authorization.Mode;
+import alluxio.security.user.UserState;
 import alluxio.time.ExponentialTimer;
 import alluxio.underfs.UnderFileSystem;
+import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.util.CommonUtils;
 import alluxio.util.SecurityUtils;
 import alluxio.util.UnderFileSystemUtils;
 import alluxio.util.WaitForOptions;
 import alluxio.wire.FileInfo;
-import alluxio.worker.job.JobMasterClientConfig;
+import alluxio.worker.job.JobMasterClientContext;
 
 import org.junit.After;
 import org.junit.Assert;
@@ -82,7 +90,7 @@ public final class PersistenceTest {
   private SafeModeManager mSafeModeManager;
   private long mStartTimeMs;
   private int mPort;
-  private static final GetStatusOptions GET_STATUS_OPTIONS = GetStatusOptions.defaults();
+  private static final GetStatusContext GET_STATUS_CONTEXT = GetStatusContext.defaults();
 
   @Rule
   public ManuallyScheduleHeartbeat mManualScheduler =
@@ -91,26 +99,27 @@ public final class PersistenceTest {
 
   @Before
   public void before() throws Exception {
-    AuthenticatedClientUser.set(LoginUser.get().getName());
+    UserState s = UserState.Factory.create(ServerConfiguration.global());
+    AuthenticatedClientUser.set(s.getUser().getName());
     TemporaryFolder tmpFolder = new TemporaryFolder();
     tmpFolder.create();
     File ufsRoot = tmpFolder.newFolder();
-    Configuration.set(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS, ufsRoot.getAbsolutePath());
-    Configuration.set(PropertyKey.MASTER_PERSISTENCE_INITIAL_INTERVAL_MS, 0);
-    Configuration.set(PropertyKey.MASTER_PERSISTENCE_MAX_INTERVAL_MS, 1000);
-    Configuration.set(PropertyKey.MASTER_PERSISTENCE_INITIAL_WAIT_TIME_MS, 0);
-    Configuration.set(PropertyKey.MASTER_PERSISTENCE_MAX_TOTAL_WAIT_TIME_MS, 1000);
+    ServerConfiguration.set(PropertyKey.MASTER_JOURNAL_TYPE, JournalType.UFS);
+    ServerConfiguration.set(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS, ufsRoot.getAbsolutePath());
+    ServerConfiguration.set(PropertyKey.MASTER_PERSISTENCE_INITIAL_INTERVAL_MS, 0);
+    ServerConfiguration.set(PropertyKey.MASTER_PERSISTENCE_MAX_INTERVAL_MS, 1000);
+    ServerConfiguration.set(PropertyKey.MASTER_PERSISTENCE_MAX_TOTAL_WAIT_TIME_MS, 1000);
     mJournalFolder = tmpFolder.newFolder();
     mSafeModeManager = new DefaultSafeModeManager();
     mStartTimeMs = System.currentTimeMillis();
-    mPort = Configuration.getInt(PropertyKey.MASTER_RPC_PORT);
+    mPort = ServerConfiguration.getInt(PropertyKey.MASTER_RPC_PORT);
     startServices();
   }
 
   @After
   public void after() throws Exception {
     stopServices();
-    ConfigurationTestUtils.resetConfiguration();
+    ServerConfiguration.reset();
     AuthenticatedClientUser.remove();
   }
 
@@ -138,21 +147,18 @@ public final class PersistenceTest {
   public void successfulAsyncPersistence() throws Exception {
     // Create a file and check the internal state.
     AlluxioURI testFile = createTestFile();
-    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Assert.assertEquals(PersistenceState.NOT_PERSISTED.toString(), fileInfo.getPersistenceState());
 
-    // Repeatedly schedule the async persistence, checking the internal state.
-    {
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-    }
+    // schedule the async persistence, checking the internal state.
+    mFileSystemMaster.scheduleAsyncPersistence(testFile,
+        ScheduleAsyncPersistenceContext.defaults());
+    checkPersistenceRequested(testFile);
 
     // Mock the job service interaction.
     Random random = new Random();
     long jobId = random.nextLong();
-    Mockito.when(mMockJobMasterClient.run(Mockito.any(JobConfig.class))).thenReturn(jobId);
+    Mockito.when(mMockJobMasterClient.run(any(JobConfig.class))).thenReturn(jobId);
 
     // Repeatedly execute the persistence checker heartbeat, checking the internal state.
     {
@@ -163,9 +169,8 @@ public final class PersistenceTest {
     }
 
     // Mock the job service interaction.
-    JobInfo jobInfo = new JobInfo();
-    jobInfo.setStatus(Status.CREATED);
-    Mockito.when(mMockJobMasterClient.getStatus(Mockito.anyLong())).thenReturn(jobInfo);
+    JobInfo jobInfo = createJobInfo(Status.CREATED);
+    Mockito.when(mMockJobMasterClient.getJobStatus(Mockito.anyLong())).thenReturn(jobInfo);
 
     // Repeatedly execute the persistence checker heartbeat, checking the internal state.
     {
@@ -176,8 +181,8 @@ public final class PersistenceTest {
     }
 
     // Mock the job service interaction.
-    jobInfo.setStatus(Status.RUNNING);
-    Mockito.when(mMockJobMasterClient.getStatus(Mockito.anyLong())).thenReturn(jobInfo);
+    jobInfo = createJobInfo(Status.RUNNING);
+    Mockito.when(mMockJobMasterClient.getJobStatus(Mockito.anyLong())).thenReturn(jobInfo);
 
     // Repeatedly execute the persistence checker heartbeat, checking the internal state.
     {
@@ -188,15 +193,16 @@ public final class PersistenceTest {
     }
 
     // Mock the job service interaction.
-    jobInfo.setStatus(Status.COMPLETED);
-    Mockito.when(mMockJobMasterClient.getStatus(Mockito.anyLong())).thenReturn(jobInfo);
+    jobInfo = createJobInfo(Status.COMPLETED);
+    Mockito.when(mMockJobMasterClient.getJobStatus(Mockito.anyLong())).thenReturn(jobInfo);
 
     {
       // Create the temporary UFS file.
-      fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+      fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
       Map<Long, PersistJob> persistJobs = getPersistJobs();
       PersistJob job = persistJobs.get(fileInfo.getFileId());
-      UnderFileSystem ufs = UnderFileSystem.Factory.create(job.getTempUfsPath());
+      UnderFileSystem ufs = UnderFileSystem.Factory.create(job.getTempUfsPath().toString(),
+          UnderFileSystemConfiguration.defaults(ServerConfiguration.global()));
       UnderFileSystemUtils.touch(ufs, job.getTempUfsPath());
     }
 
@@ -216,21 +222,18 @@ public final class PersistenceTest {
   public void noRetryCanceled() throws Exception {
     // Create a file and check the internal state.
     AlluxioURI testFile = createTestFile();
-    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Assert.assertEquals(PersistenceState.NOT_PERSISTED.toString(), fileInfo.getPersistenceState());
 
-    // Repeatedly schedule the async persistence, checking the internal state.
-    {
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-    }
+    // schedule the async persistence, checking the internal state.
+    mFileSystemMaster.scheduleAsyncPersistence(testFile,
+        ScheduleAsyncPersistenceContext.defaults());
+    checkPersistenceRequested(testFile);
 
     // Mock the job service interaction.
     Random random = new Random();
     long jobId = random.nextLong();
-    Mockito.when(mMockJobMasterClient.run(Mockito.any(JobConfig.class))).thenReturn(jobId);
+    Mockito.when(mMockJobMasterClient.run(any(JobConfig.class))).thenReturn(jobId);
 
     // Repeatedly execute the persistence checker heartbeat, checking the internal state.
     {
@@ -241,9 +244,8 @@ public final class PersistenceTest {
     }
 
     // Mock the job service interaction.
-    JobInfo jobInfo = new JobInfo();
-    jobInfo.setStatus(Status.CANCELED);
-    Mockito.when(mMockJobMasterClient.getStatus(Mockito.anyLong())).thenReturn(jobInfo);
+    JobInfo jobInfo = createJobInfo(Status.CANCELED);
+    Mockito.when(mMockJobMasterClient.getJobStatus(Mockito.anyLong())).thenReturn(jobInfo);
 
     // Execute the persistence checker heartbeat, checking the internal state.
     {
@@ -259,21 +261,18 @@ public final class PersistenceTest {
   public void retryFailed() throws Exception {
     // Create a file and check the internal state.
     AlluxioURI testFile = createTestFile();
-    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Assert.assertEquals(PersistenceState.NOT_PERSISTED.toString(), fileInfo.getPersistenceState());
 
-    // Repeatedly schedule the async persistence, checking the internal state.
-    {
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-    }
+    // schedule the async persistence, checking the internal state.
+    mFileSystemMaster.scheduleAsyncPersistence(testFile,
+        ScheduleAsyncPersistenceContext.defaults());
+    checkPersistenceRequested(testFile);
 
     // Mock the job service interaction.
     Random random = new Random();
     long jobId = random.nextLong();
-    Mockito.when(mMockJobMasterClient.run(Mockito.any(JobConfig.class))).thenReturn(jobId);
+    Mockito.when(mMockJobMasterClient.run(any(JobConfig.class))).thenReturn(jobId);
 
     // Repeatedly execute the persistence checker heartbeat, checking the internal state.
     {
@@ -284,9 +283,8 @@ public final class PersistenceTest {
     }
 
     // Mock the job service interaction.
-    JobInfo jobInfo = new JobInfo();
-    jobInfo.setStatus(Status.FAILED);
-    Mockito.when(mMockJobMasterClient.getStatus(Mockito.anyLong())).thenReturn(jobInfo);
+    JobInfo jobInfo = createJobInfo(Status.FAILED);
+    Mockito.when(mMockJobMasterClient.getJobStatus(Mockito.anyLong())).thenReturn(jobInfo);
 
     // Repeatedly execute the persistence checker and scheduler heartbeats, checking the internal
     // state. After the internal timeout associated with the operation expires, check the operation
@@ -303,7 +301,7 @@ public final class PersistenceTest {
       }
       CommonUtils.sleepMs(100);
     }
-    fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Assert.assertEquals(PersistenceState.NOT_PERSISTED.toString(), fileInfo.getPersistenceState());
   }
 
@@ -313,25 +311,27 @@ public final class PersistenceTest {
    */
   @Test(timeout = 20000)
   public void retryPersistJobRenameDelete() throws Exception {
-    AuthenticatedClientUser.set(LoginUser.get().getName());
+    UserState s = UserState.Factory.create(ServerConfiguration.global());
+    AuthenticatedClientUser.set(s.getUser().getName());
     // Create src file and directory, checking the internal state.
     AlluxioURI alluxioDirSrc = new AlluxioURI("/src");
     mFileSystemMaster.createDirectory(alluxioDirSrc,
-        CreateDirectoryOptions.defaults().setPersisted(true));
+        CreateDirectoryContext.defaults().setWriteType(WriteType.CACHE_THROUGH));
     AlluxioURI alluxioFileSrc = new AlluxioURI("/src/in_alluxio");
-    long fileId = mFileSystemMaster.createFile(alluxioFileSrc,
-        CreateFileOptions.defaults().setPersisted(false));
-    Assert.assertEquals(PersistenceState.NOT_PERSISTED.toString(),
-        mFileSystemMaster.getFileInfo(fileId).getPersistenceState());
+    FileInfo info = mFileSystemMaster.createFile(alluxioFileSrc,
+        CreateFileContext.defaults().setWriteType(WriteType.MUST_CACHE));
+    Assert.assertEquals(PersistenceState.NOT_PERSISTED.toString(), info.getPersistenceState());
+    mFileSystemMaster.completeFile(alluxioFileSrc, CompleteFileContext.defaults());
 
     // Schedule the async persistence, checking the internal state.
-    mFileSystemMaster.scheduleAsyncPersistence(alluxioFileSrc);
+    mFileSystemMaster.scheduleAsyncPersistence(alluxioFileSrc,
+        ScheduleAsyncPersistenceContext.defaults());
     checkPersistenceRequested(alluxioFileSrc);
 
     // Mock the job service interaction.
     Random random = new Random();
     long jobId = random.nextLong();
-    Mockito.when(mMockJobMasterClient.run(Mockito.any(JobConfig.class))).thenReturn(jobId);
+    Mockito.when(mMockJobMasterClient.run(any(JobConfig.class))).thenReturn(jobId);
 
     // Execute the persistence scheduler heartbeat, checking the internal state.
     HeartbeatScheduler.execute(HeartbeatContext.MASTER_PERSISTENCE_SCHEDULER);
@@ -339,9 +339,8 @@ public final class PersistenceTest {
     checkPersistenceInProgress(alluxioFileSrc, jobId);
 
     // Mock the job service interaction.
-    JobInfo jobInfo = new JobInfo();
-    jobInfo.setStatus(Status.CREATED);
-    Mockito.when(mMockJobMasterClient.getStatus(Mockito.anyLong())).thenReturn(jobInfo);
+    JobInfo jobInfo = createJobInfo(Status.CREATED);
+    Mockito.when(mMockJobMasterClient.getJobStatus(Mockito.anyLong())).thenReturn(jobInfo);
 
     // Execute the persistence checker heartbeat, checking the internal state.
     HeartbeatScheduler.execute(HeartbeatContext.MASTER_PERSISTENCE_CHECKER);
@@ -349,25 +348,27 @@ public final class PersistenceTest {
     checkPersistenceInProgress(alluxioFileSrc, jobId);
 
     // Mock the job service interaction.
-    jobInfo.setStatus(Status.COMPLETED);
-    Mockito.when(mMockJobMasterClient.getStatus(Mockito.anyLong())).thenReturn(jobInfo);
+    jobInfo = createJobInfo(Status.COMPLETED);
+    Mockito.when(mMockJobMasterClient.getJobStatus(Mockito.anyLong())).thenReturn(jobInfo);
 
     // Create the temporary UFS file.
     {
       Map<Long, PersistJob> persistJobs = getPersistJobs();
-      PersistJob job = persistJobs.get(fileId);
-      UnderFileSystem ufs = UnderFileSystem.Factory.create(job.getTempUfsPath());
+      PersistJob job = persistJobs.get(info.getFileId());
+      UnderFileSystem ufs = UnderFileSystem.Factory.create(job.getTempUfsPath().toString(),
+          UnderFileSystemConfiguration.defaults(ServerConfiguration.global()));
       UnderFileSystemUtils.touch(ufs, job.getTempUfsPath());
     }
 
     // Rename the src file before the persist is commited.
     mFileSystemMaster.createDirectory(new AlluxioURI("/dst"),
-        CreateDirectoryOptions.defaults().setPersisted(true));
+        CreateDirectoryContext.defaults().setWriteType(WriteType.CACHE_THROUGH));
     AlluxioURI alluxioFileDst = new AlluxioURI("/dst/in_alluxio");
-    mFileSystemMaster.rename(alluxioFileSrc, alluxioFileDst, RenameOptions.defaults());
+    mFileSystemMaster.rename(alluxioFileSrc, alluxioFileDst, RenameContext.defaults());
 
     // Delete the src directory recursively.
-    mFileSystemMaster.delete(alluxioDirSrc, DeleteOptions.defaults().setRecursive(true));
+    mFileSystemMaster.delete(alluxioDirSrc,
+        DeleteContext.mergeFrom(DeletePOptions.newBuilder().setRecursive(true)));
 
     // Execute the persistence checker heartbeat, checking the internal state. This should
     // re-schedule the persist task as tempUfsPath is deleted.
@@ -377,7 +378,7 @@ public final class PersistenceTest {
 
     // Mock job service interaction.
     jobId = random.nextLong();
-    Mockito.when(mMockJobMasterClient.run(Mockito.any(JobConfig.class))).thenReturn(jobId);
+    Mockito.when(mMockJobMasterClient.run(any(JobConfig.class))).thenReturn(jobId);
 
     // Execute the persistence scheduler heartbeat, checking the internal state.
     HeartbeatScheduler.execute(HeartbeatContext.MASTER_PERSISTENCE_SCHEDULER);
@@ -392,16 +393,13 @@ public final class PersistenceTest {
   public void replayPersistRequest() throws Exception {
     // Create a file and check the internal state.
     AlluxioURI testFile = createTestFile();
-    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Assert.assertEquals(PersistenceState.NOT_PERSISTED.toString(), fileInfo.getPersistenceState());
 
-    // Repeatedly schedule the async persistence, checking the internal state.
-    {
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-    }
+    // schedule the async persistence, checking the internal state.
+    mFileSystemMaster.scheduleAsyncPersistence(testFile,
+        ScheduleAsyncPersistenceContext.defaults());
+    checkPersistenceRequested(testFile);
 
     // Simulate restart.
     stopServices();
@@ -417,21 +415,18 @@ public final class PersistenceTest {
   public void replayPersistJob() throws Exception {
     // Create a file and check the internal state.
     AlluxioURI testFile = createTestFile();
-    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Assert.assertEquals(PersistenceState.NOT_PERSISTED.toString(), fileInfo.getPersistenceState());
 
-    // Repeatedly schedule the async persistence, checking the internal state.
-    {
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-      mFileSystemMaster.scheduleAsyncPersistence(testFile);
-      checkPersistenceRequested(testFile);
-    }
+    // schedule the async persistence, checking the internal state.
+    mFileSystemMaster.scheduleAsyncPersistence(testFile,
+        ScheduleAsyncPersistenceContext.defaults());
+    checkPersistenceRequested(testFile);
 
     // Mock the job service interaction.
     Random random = new Random();
     long jobId = random.nextLong();
-    Mockito.when(mMockJobMasterClient.run(Mockito.any(JobConfig.class))).thenReturn(jobId);
+    Mockito.when(mMockJobMasterClient.run(any(JobConfig.class))).thenReturn(jobId);
 
     // Repeatedly execute the persistence checker heartbeat, checking the internal state.
     {
@@ -448,13 +443,21 @@ public final class PersistenceTest {
     checkPersistenceInProgress(testFile, jobId);
   }
 
+  private JobInfo createJobInfo(Status status) {
+    return new PlanInfo(1, "test", status, 0, null);
+  }
+
   private AlluxioURI createTestFile() throws Exception {
     AlluxioURI path = new AlluxioURI("/" + CommonUtils.randomAlphaNumString(10));
-    String owner = SecurityUtils.getOwnerFromThriftClient();
-    String group = SecurityUtils.getGroupFromThriftClient();
-    mFileSystemMaster.createFile(path, CreateFileOptions.defaults()
-        .setOwner(owner).setGroup(group).setMode(Mode.createFullAccess()));
-    mFileSystemMaster.completeFile(path, CompleteFileOptions.defaults());
+    String owner = SecurityUtils.getOwnerFromGrpcClient(ServerConfiguration.global());
+    String group = SecurityUtils.getGroupFromGrpcClient(ServerConfiguration.global());
+    mFileSystemMaster.createFile(path,
+        CreateFileContext
+            .mergeFrom(
+                CreateFilePOptions.newBuilder().setMode(Mode.createFullAccess().toProto()))
+            .setWriteType(WriteType.MUST_CACHE)
+            .setOwner(owner).setGroup(group));
+    mFileSystemMaster.completeFile(path, CompleteFileContext.defaults());
     return path;
   }
 
@@ -467,7 +470,7 @@ public final class PersistenceTest {
     // Persistence completion is asynchronous, so waiting is necessary.
     CommonUtils.waitFor("async persistence is completed for file", () -> {
       try {
-        FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+        FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
         return fileInfo.getPersistenceState().equals(PersistenceState.PERSISTED.toString());
       } catch (FileDoesNotExistException | InvalidPathException | AccessControlException
           | IOException e) {
@@ -475,7 +478,7 @@ public final class PersistenceTest {
       }
     }, WaitForOptions.defaults().setTimeoutMs(30000));
 
-    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Map<Long, PersistJob> persistJobs = getPersistJobs();
     Assert.assertEquals(0, getPersistRequests().size());
     // We update the file info before removing the persist job, so we must wait here.
@@ -485,7 +488,7 @@ public final class PersistenceTest {
   }
 
   private void checkPersistenceInProgress(AlluxioURI testFile, long jobId) throws Exception {
-    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Map<Long, PersistJob> persistJobs = getPersistJobs();
     Assert.assertEquals(0, getPersistRequests().size());
     Assert.assertEquals(1, persistJobs.size());
@@ -499,7 +502,7 @@ public final class PersistenceTest {
   }
 
   private void checkPersistenceRequested(AlluxioURI testFile) throws Exception {
-    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_OPTIONS);
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(testFile, GET_STATUS_CONTEXT);
     Map<Long, ExponentialTimer> persistRequests = getPersistRequests();
     Assert.assertEquals(1, persistRequests.size());
     Assert.assertEquals(0, getPersistJobs().size());
@@ -520,7 +523,7 @@ public final class PersistenceTest {
     mRegistry = new MasterRegistry();
     JournalSystem journalSystem =
         JournalTestUtils.createJournalSystem(mJournalFolder.getAbsolutePath());
-    MasterContext context = MasterTestUtils.testMasterContext(journalSystem);
+    CoreMasterContext context = MasterTestUtils.testMasterContext(journalSystem);
     new MetricsMasterFactory().create(mRegistry, context);
     new BlockMasterFactory().create(mRegistry, context);
     mFileSystemMaster = new FileSystemMasterFactory().create(mRegistry, context);
@@ -529,7 +532,7 @@ public final class PersistenceTest {
     mRegistry.start(true);
     mMockJobMasterClient = Mockito.mock(JobMasterClient.class);
     PowerMockito.mockStatic(JobMasterClient.Factory.class);
-    Mockito.when(JobMasterClient.Factory.create(Mockito.any(JobMasterClientConfig.class)))
+    Mockito.when(JobMasterClient.Factory.create(any(JobMasterClientContext.class)))
         .thenReturn(mMockJobMasterClient);
   }
 

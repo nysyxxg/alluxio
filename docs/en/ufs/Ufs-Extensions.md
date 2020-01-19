@@ -2,7 +2,7 @@
 layout: global
 title: Third-party Under Storage Extensions
 nickname: Third-party UFS
-group: Under Stores
+group: Storage Integrations
 priority: 100
 ---
 
@@ -25,6 +25,7 @@ Following is a list of under storage extension projects:
 - [S3N](https://github.com/Alluxio/alluxio-extensions/tree/master/underfs/s3n)
 - [GlusterFS](https://github.com/Alluxio/alluxio-extensions/tree/master/underfs/glusterfs)
 - [OBS](https://github.com/Alluxio/alluxio-extensions/tree/master/underfs/obs)
+- [SSH UFS](https://github.com/Alluxio/alluxio-extensions/tree/master/underfs/ssh)
 
 ## Managing Extensions
 
@@ -38,8 +39,8 @@ running in containers, build a custom image with extension binaries in the appro
 
 A command line utility is provided to aid extension manangement.
 
-```bash
-$ bin/alluxio extensions
+```console
+$ ./bin/alluxio extensions
 Usage: alluxio extensions [generic options]
 	 [install <URI>]
 	 [ls]
@@ -68,11 +69,12 @@ hosts are not reachable from the host executing the command.
 
 To install an extension from maven, download the JAR first and then install as follows:
 
-```bash
-$ mvn dependency:get -DremoteRepositories=http://repo1.maven.org/maven2/ -DgroupId=<extension-group> \
- -DartifactId=<extension-artifact> -Dversion=<version> -Dtransitive=false -Ddest=<extension>.jar
+```console
+$ mvn dependency:get -DremoteRepositories=http://repo1.maven.org/maven2/ \ 
+  -DgroupId=<extension-group> -DartifactId=<extension-artifact> \ 
+  -Dversion=<version> -Dtransitive=false -Ddest=<extension>.jar
 
-$ bin/alluxio extensions install <extension.jar>
+$ ./bin/alluxio extensions install <extension.jar>
 ```
 
 ## Validation
@@ -80,13 +82,13 @@ $ bin/alluxio extensions install <extension.jar>
 Once the extension JAR has been distributed, you should be able to mount your under storage using
 the Alluxio CLI as follows:
 
-```bash
-$ bin/alluxio fs mount /my-storage <scheme>://<path>/ --option <key>=<value>
+```console
+$ ./bin/alluxio fs mount /my-storage <scheme>://<path>/ --option <key>=<value>
 ```
 where, `<key>=<value>` can be replaced with any required configuration for the under storage.
 
 To run sanity tests execute:
 
-```bash
-$ bin/alluxio runTests --directory /my-storage
+```console
+$ ./bin/alluxio runTests --directory /my-storage
 ```

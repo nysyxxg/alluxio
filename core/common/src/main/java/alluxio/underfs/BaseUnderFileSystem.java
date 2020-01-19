@@ -68,7 +68,7 @@ public abstract class BaseUnderFileSystem implements UnderFileSystem {
 
   @Override
   public OutputStream create(String path) throws IOException {
-    return create(path, CreateOptions.defaults().setCreateParent(true));
+    return create(path, CreateOptions.defaults(mUfsConf).setCreateParent(true));
   }
 
   @Override
@@ -88,7 +88,7 @@ public abstract class BaseUnderFileSystem implements UnderFileSystem {
   }
 
   @Override
-  public void setAclEntries(String path, List<AclEntry> aclEntries) throws IOException{
+  public void setAclEntries(String path, List<AclEntry> aclEntries) throws IOException {
     // Noop here by default
   }
 
@@ -181,7 +181,7 @@ public abstract class BaseUnderFileSystem implements UnderFileSystem {
 
   @Override
   public boolean mkdirs(String path) throws IOException {
-    return mkdirs(path, MkdirsOptions.defaults());
+    return mkdirs(path, MkdirsOptions.defaults(mUfsConf));
   }
 
   @Override

@@ -11,9 +11,10 @@
 
 package alluxio.cli.job.command;
 
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
 import alluxio.cli.fs.command.AbstractFileSystemCommand;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.client.job.JobContext;
 import alluxio.exception.status.InvalidArgumentException;
 
@@ -29,16 +30,17 @@ import javax.annotation.concurrent.ThreadSafe;
  * Prints the current leader master host name.
  */
 @ThreadSafe
+@PublicApi
 public final class LeaderCommand extends AbstractFileSystemCommand {
   private static final Logger LOG = LoggerFactory.getLogger(LeaderCommand.class);
 
   /**
    * creates the job leader command.
    *
-   * @param fs the Alluxio filesystem client
+   * @param fsContext the Alluxio filesystem client
    */
-  public LeaderCommand(FileSystem fs) {
-    super(fs);
+  public LeaderCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -54,7 +56,9 @@ public final class LeaderCommand extends AbstractFileSystemCommand {
   @Override
   public int run(CommandLine cl) {
     try {
-      InetSocketAddress address = JobContext.INSTANCE.getJobMasterAddress();
+      InetSocketAddress address = JobContext
+          .create(mFsContext.getClusterConf(), mFsContext.getClientContext().getUserState())
+          .getJobMasterAddress();
       System.out.println(address.getHostName());
     } catch (Exception e) {
       LOG.error("Failed to get the primary job master", e);

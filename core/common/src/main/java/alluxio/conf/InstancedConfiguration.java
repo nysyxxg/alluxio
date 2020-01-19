@@ -11,14 +11,13 @@
 
 package alluxio.conf;
 
-import alluxio.AlluxioConfiguration;
-import alluxio.ConfigurationValueOptions;
-import alluxio.PropertyKey;
-import alluxio.PropertyKey.Template;
+import alluxio.conf.PropertyKey.Template;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.PreconditionMessage;
+import alluxio.util.ConfigurationUtils;
 import alluxio.util.FormatUtils;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Lists;
@@ -33,9 +32,12 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.annotation.Nonnull;
 
 /**
  * Alluxio configuration.
@@ -50,25 +52,78 @@ public class InstancedConfiguration implements AlluxioConfiguration {
   /** Source of the truth of all property values (default or customized). */
   protected AlluxioProperties mProperties;
 
+  private final boolean mClusterDefaultsLoaded;
+
   /**
+   * Users should use this API to obtain a configuration for modification before passing to a
+   * FileSystem constructor. The default configuration contains all default configuration params
+   * and configuration properties modified in the alluxio-site.properties file.
+   *
+   * Example usage:
+   *
+   * InstancedConfiguration conf = InstancedConfiguration.defaults();
+   * conf.set(...);
+   * FileSystem fs = FileSystem.Factory.create(conf);
+   *
+   * WARNING: This API is unstable and may be changed in a future minor release.
+   *
+   * @return an instanced configuration preset with defaults
+   */
+  public static InstancedConfiguration defaults() {
+    return new InstancedConfiguration(ConfigurationUtils.defaults());
+  }
+
+  /**
+   * Creates a new instance of {@link InstancedConfiguration}.
+   *
+   * WARNING: This API is not intended to be used outside of internal Alluxio code and may be
+   * changed or removed in a future minor release.
+   *
+   * Application code should use {@link InstancedConfiguration#defaults}.
+   *
    * @param properties alluxio properties underlying this configuration
    */
   public InstancedConfiguration(AlluxioProperties properties) {
     mProperties = properties;
+    mClusterDefaultsLoaded = false;
   }
 
   /**
+   * Creates a new instance of {@link InstancedConfiguration}.
+   *
+   * WARNING: This API is not intended to be used outside of internal Alluxio code and may be
+   * changed or removed in a future minor release.
+   *
+   * Application code should use {@link InstancedConfiguration#defaults}.
+   *
+   * @param properties alluxio properties underlying this configuration
+   * @param clusterDefaultsLoaded Whether or not the properties represent the cluster defaults
+   */
+  public InstancedConfiguration(AlluxioProperties properties, boolean clusterDefaultsLoaded) {
+    mProperties = properties;
+    mClusterDefaultsLoaded = clusterDefaultsLoaded;
+  }
+
+  /**
+   * Creates a new instance of {@link InstancedConfiguration}.
+   *
+   * WARNING: This API is not intended to be used outside of internal Alluxio code and may be
+   * changed or removed in a future minor release.
+   *
+   * Application code should use {@link InstancedConfiguration#defaults}.
+   *
    * @param conf configuration to copy
    */
-  public InstancedConfiguration(InstancedConfiguration conf) {
-    mProperties = new AlluxioProperties(conf.mProperties);
+  public InstancedConfiguration(AlluxioConfiguration conf) {
+    mProperties = conf.copyProperties();
+    mClusterDefaultsLoaded = conf.clusterDefaultsLoaded();
   }
 
   /**
    * @return the properties backing this configuration
    */
-  public AlluxioProperties getProperties() {
-    return mProperties;
+  public AlluxioProperties copyProperties() {
+    return mProperties.copy();
   }
 
   @Override
@@ -107,11 +162,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     return value;
   }
 
-  @Override
-  public boolean isSet(PropertyKey key) {
-    if (!mProperties.isSet(key)) {
-      return false;
-    }
+  private boolean isResolvable(PropertyKey key) {
     String val = mProperties.get(key);
     try {
       // Lookup to resolve any key before simply returning isSet. An exception will be thrown if
@@ -124,8 +175,70 @@ public class InstancedConfiguration implements AlluxioConfiguration {
   }
 
   @Override
+  public boolean isSet(PropertyKey key) {
+    return mProperties.isSet(key) && isResolvable(key);
+  }
+
+  @Override
+  public boolean isSetByUser(PropertyKey key) {
+    return mProperties.isSetByUser(key) && isResolvable(key);
+  }
+
+  /**
+   * Sets the value for the appropriate key in the {@link Properties}.
+   *
+   * @param key the key to set
+   * @param value the value for the key
+   */
+  public void set(PropertyKey key, Object value) {
+    set(key, String.valueOf(value), Source.RUNTIME);
+  }
+
+  /**
+   * Sets the value for the appropriate key in the {@link Properties} by source.
+   *
+   * @param key the key to set
+   * @param value the value for the key
+   * @param source the source of the the properties (e.g., system property, default and etc)
+   */
+  public void set(@Nonnull PropertyKey key, @Nonnull Object value, @Nonnull Source source) {
+    Preconditions.checkArgument(key != null && value != null && !value.equals(""),
+        String.format("The key value pair (%s, %s) cannot be null", key, value));
+    Preconditions.checkArgument(!value.equals(""),
+        String.format("The key \"%s\" cannot be have an empty string as a value. Use "
+            + "ServerConfiguration.unset to remove a key from the configuration.", key));
+    mProperties.put(key, String.valueOf(value), source);
+  }
+
+  /**
+   * Unsets the value for the appropriate key in the {@link Properties}. If the {@link PropertyKey}
+   * has a default value, it will still be considered set after executing this method.
+   *
+   * @param key the key to unset
+   */
+  public void unset(PropertyKey key) {
+    Preconditions.checkNotNull(key, "key");
+    mProperties.remove(key);
+  }
+
+  /**
+   * Merges map of properties into the current alluxio properties.
+   *
+   * @param properties map of keys to values
+   * @param source the source type for these properties
+   */
+  public void merge(Map<?, ?> properties, Source source) {
+    mProperties.merge(properties, source);
+  }
+
+  @Override
   public Set<PropertyKey> keySet() {
     return mProperties.keySet();
+  }
+
+  @Override
+  public Set<PropertyKey> userKeySet() {
+    return mProperties.userKeySet();
   }
 
   @Override
@@ -135,7 +248,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     try {
       return Integer.parseInt(rawValue);
     } catch (NumberFormatException e) {
-      throw new RuntimeException(ExceptionMessage.KEY_NOT_INTEGER.getMessage(key));
+      throw new RuntimeException(ExceptionMessage.KEY_NOT_INTEGER.getMessage(rawValue, key));
     }
   }
 
@@ -146,7 +259,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     try {
       return Long.parseLong(rawValue);
     } catch (NumberFormatException e) {
-      throw new RuntimeException(ExceptionMessage.KEY_NOT_LONG.getMessage(key));
+      throw new RuntimeException(ExceptionMessage.KEY_NOT_LONG.getMessage(rawValue, key));
     }
   }
 
@@ -157,7 +270,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     try {
       return Double.parseDouble(rawValue);
     } catch (NumberFormatException e) {
-      throw new RuntimeException(ExceptionMessage.KEY_NOT_DOUBLE.getMessage(key));
+      throw new RuntimeException(ExceptionMessage.KEY_NOT_DOUBLE.getMessage(rawValue, key));
     }
   }
 
@@ -168,7 +281,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     try {
       return Float.parseFloat(rawValue);
     } catch (NumberFormatException e) {
-      throw new RuntimeException(ExceptionMessage.KEY_NOT_FLOAT.getMessage(key));
+      throw new RuntimeException(ExceptionMessage.KEY_NOT_FLOAT.getMessage(rawValue, key));
     }
   }
 
@@ -181,7 +294,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     } else if (rawValue.equalsIgnoreCase("false")) {
       return false;
     } else {
-      throw new RuntimeException(ExceptionMessage.KEY_NOT_BOOLEAN.getMessage(key));
+      throw new RuntimeException(ExceptionMessage.KEY_NOT_BOOLEAN.getMessage(rawValue, key));
     }
   }
 
@@ -202,7 +315,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     try {
       return Enum.valueOf(enumType, rawValue);
     } catch (IllegalArgumentException e) {
-      throw new RuntimeException(ExceptionMessage.UNKNOWN_ENUM.getMessage(rawValue,
+      throw new RuntimeException(ExceptionMessage.UNKNOWN_ENUM.getMessage(rawValue, key,
           Arrays.toString(enumType.getEnumConstants())));
     }
   }
@@ -214,7 +327,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     try {
       return FormatUtils.parseSpaceSize(rawValue);
     } catch (Exception ex) {
-      throw new RuntimeException(ExceptionMessage.KEY_NOT_BYTES.getMessage(key));
+      throw new RuntimeException(ExceptionMessage.KEY_NOT_BYTES.getMessage(rawValue, key));
     }
   }
 
@@ -224,7 +337,7 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     try {
       return FormatUtils.parseTimeSize(rawValue);
     } catch (Exception e) {
-      throw new RuntimeException(ExceptionMessage.KEY_NOT_MS.getMessage(key));
+      throw new RuntimeException(ExceptionMessage.KEY_NOT_MS.getMessage(rawValue, key));
     }
   }
 
@@ -266,11 +379,6 @@ public class InstancedConfiguration implements AlluxioConfiguration {
   }
 
   @Override
-  public void merge(Map<?, ?> properties, Source source) {
-    mProperties.merge(properties, source);
-  }
-
-  @Override
   public Map<String, String> toMap(ConfigurationValueOptions opts) {
     Map<String, String> map = new HashMap<>();
     // Cannot use Collectors.toMap because we support null keys.
@@ -290,12 +398,29 @@ public class InstancedConfiguration implements AlluxioConfiguration {
               + "and must be specified as a JVM property. "
               + "If no JVM property is present, Alluxio will use default value '%s'.",
           key.getName(), key.getDefaultValue());
+
+      if (PropertyKey.isDeprecated(key) && getSource(key).compareTo(Source.DEFAULT) != 0) {
+        LOG.warn("{} is deprecated. Please avoid using this key in the future. {}", key.getName(),
+            PropertyKey.getDeprecationMessage(key));
+      }
     }
+
     checkTimeouts();
     checkWorkerPorts();
     checkUserFileBufferBytes();
     checkZkConfiguration();
     checkTieredLocality();
+    checkTieredStorage();
+  }
+
+  @Override
+  public boolean clusterDefaultsLoaded() {
+    return mClusterDefaultsLoaded;
+  }
+
+  @Override
+  public String hash() {
+    return mProperties.hash();
   }
 
   /**
@@ -340,7 +465,6 @@ public class InstancedConfiguration implements AlluxioConfiguration {
         throw new UnresolvablePropertyException(ExceptionMessage
             .UNDEFINED_CONFIGURATION_KEY.getMessage(match));
       }
-      LOG.debug("Replacing {} with {}", matcher.group(1), value);
       resolved = resolved.replaceFirst(REGEX_STRING, Matcher.quoteReplacement(value));
     }
     return resolved;
@@ -356,8 +480,6 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     if (maxWorkersPerHost > 1) {
       String message = "%s cannot be specified when allowing multiple workers per host with "
           + PropertyKey.Name.INTEGRATION_YARN_WORKERS_PER_HOST_MAX + "=" + maxWorkersPerHost;
-      Preconditions.checkState(System.getProperty(PropertyKey.Name.WORKER_DATA_PORT) == null,
-          String.format(message, PropertyKey.WORKER_DATA_PORT));
       Preconditions.checkState(System.getProperty(PropertyKey.Name.WORKER_RPC_PORT) == null,
           String.format(message, PropertyKey.WORKER_RPC_PORT));
       Preconditions.checkState(System.getProperty(PropertyKey.Name.WORKER_WEB_PORT) == null,
@@ -374,12 +496,12 @@ public class InstancedConfiguration implements AlluxioConfiguration {
     if (waitTime < retryInterval) {
       LOG.warn("{}={}ms is smaller than {}={}ms. Workers might not have enough time to register. "
               + "Consider either increasing {} or decreasing {}",
-          PropertyKey.Name.MASTER_WORKER_CONNECT_WAIT_TIME, waitTime,
-          PropertyKey.Name.USER_RPC_RETRY_MAX_SLEEP_MS, retryInterval,
-          PropertyKey.Name.MASTER_WORKER_CONNECT_WAIT_TIME,
-          PropertyKey.Name.USER_RPC_RETRY_MAX_SLEEP_MS);
+          PropertyKey.MASTER_WORKER_CONNECT_WAIT_TIME, waitTime,
+          PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS, retryInterval,
+          PropertyKey.MASTER_WORKER_CONNECT_WAIT_TIME,
+          PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS);
     }
-    checkHeartbeatTimeout(PropertyKey.MASTER_MASTER_HEARTBEAT_INTERVAL,
+    checkHeartbeatTimeout(PropertyKey.MASTER_STANDBY_HEARTBEAT_INTERVAL,
         PropertyKey.MASTER_HEARTBEAT_TIMEOUT);
     // Skip checking block worker heartbeat config because the timeout is master-side while the
     // heartbeat interval is worker-side.
@@ -450,6 +572,34 @@ public class InstancedConfiguration implements AlluxioConfiguration {
                   + "configured by %s", tierName, key, tiers, PropertyKey.LOCALITY_ORDER));
         }
       }
+    }
+  }
+
+  /**
+   * Checks that tiered storage configuration on worker is consistent with the global configuration.
+   *
+   * @throws IllegalStateException if invalid tiered storage configuration is encountered
+   */
+  @VisibleForTesting
+  void checkTieredStorage() {
+    int globalTiers = getInt(PropertyKey.MASTER_TIERED_STORE_GLOBAL_LEVELS);
+    Set<String> globalTierAliasSet = new HashSet<>();
+    for (int i = 0; i < globalTiers; i++) {
+      globalTierAliasSet
+          .add(get(PropertyKey.Template.MASTER_TIERED_STORE_GLOBAL_LEVEL_ALIAS.format(i)));
+    }
+    int workerTiers = getInt(PropertyKey.WORKER_TIERED_STORE_LEVELS);
+    Preconditions.checkState(workerTiers <= globalTiers,
+        "%s tiers on worker (configured by %s), larger than global %s tiers (configured by %s) ",
+        workerTiers, PropertyKey.WORKER_TIERED_STORE_LEVELS,
+        globalTiers, PropertyKey.MASTER_TIERED_STORE_GLOBAL_LEVELS);
+    for (int i = 0; i < workerTiers; i++) {
+      PropertyKey key = Template.WORKER_TIERED_STORE_LEVEL_ALIAS.format(i);
+      String alias = get(key);
+      Preconditions.checkState(globalTierAliasSet.contains(alias),
+          "Alias \"%s\" on tier %s on worker (configured by %s) is not found in global tiered "
+              + "storage setting: %s",
+          alias, i, key, String.join(", ", globalTierAliasSet));
     }
   }
 

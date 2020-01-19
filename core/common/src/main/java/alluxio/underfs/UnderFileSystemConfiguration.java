@@ -11,8 +11,10 @@
 
 package alluxio.underfs;
 
-import alluxio.Configuration;
 import alluxio.annotation.PublicApi;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.AlluxioProperties;
+import alluxio.conf.ConfigurationValueOptions;
 import alluxio.conf.InstancedConfiguration;
 import alluxio.conf.Source;
 
@@ -43,17 +45,18 @@ public final class UnderFileSystemConfiguration extends InstancedConfiguration {
   private boolean mShared;
 
   /**
-   * @return default UFS configuration
+   * @param alluxioConf Alluxio configuration
+   * @return ufs configuration from a given alluxio configuration
    */
-  public static UnderFileSystemConfiguration defaults() {
-    return new UnderFileSystemConfiguration();
+  public static UnderFileSystemConfiguration defaults(AlluxioConfiguration alluxioConf) {
+    return new UnderFileSystemConfiguration(alluxioConf.copyProperties());
   }
 
   /**
-   * Constructs a new instance of {@link UnderFileSystemConfiguration} with defaults.
+   * Constructs a new instance of {@link UnderFileSystemConfiguration} with the given properties.
    */
-  private UnderFileSystemConfiguration() {
-    super(Configuration.copyProperties());
+  private UnderFileSystemConfiguration(AlluxioProperties props) {
+    super(props);
     mReadOnly = false;
     mShared = false;
   }
@@ -104,12 +107,27 @@ public final class UnderFileSystemConfiguration extends InstancedConfiguration {
   }
 
   /**
+   * Creates a new instance from the current configuration and adds in new properties.
    * @param mountConf the mount specific configuration map
    * @return the updated configuration object
    */
-  public UnderFileSystemConfiguration setMountSpecificConf(Map<String, String> mountConf) {
-    mProperties = Configuration.copyProperties();
-    merge(mountConf, Source.MOUNT_OPTION);
-    return this;
+  public UnderFileSystemConfiguration createMountSpecificConf(Map<String, String> mountConf) {
+    UnderFileSystemConfiguration ufsConf = new UnderFileSystemConfiguration(mProperties.copy());
+    ufsConf.mProperties.merge(mountConf, Source.MOUNT_OPTION);
+    ufsConf.mReadOnly = mReadOnly;
+    ufsConf.mShared = mShared;
+    return ufsConf;
+  }
+
+  /**
+   * @param options options for formatting the configuration values
+   * @return a map from all user configuration property names to their values; values may
+   * potentially be null
+   */
+  public Map<String, String> toUserPropertyMap(ConfigurationValueOptions options) {
+    Map<String, String> map = new HashMap<>();
+    // Cannot use Collectors.toMap because we support null keys.
+    userKeySet().forEach(key -> map.put(key.getName(), getOrDefault(key, null, options)));
+    return map;
   }
 }

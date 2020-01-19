@@ -70,12 +70,8 @@ final class FaultTolerantAlluxioJobMasterProcess extends AlluxioJobMasterProcess
         stopMaster();
         LOG.info("Secondary stopped");
         startMaster(true);
-        mServingThread = new Thread(new Runnable() {
-          @Override
-          public void run() {
-            startServing(" (gained leadership)", " (lost leadership)");
-          }
-        }, "MasterServingThread");
+        mServingThread = new Thread(() -> startServing(
+                " (gained leadership)", " (lost leadership)"), "MasterServingThread");
         mServingThread.start();
         LOG.info("Primary started");
       } else {
@@ -105,7 +101,7 @@ final class FaultTolerantAlluxioJobMasterProcess extends AlluxioJobMasterProcess
   @Override
   public boolean waitForReady(int timeoutMs) {
     try {
-      CommonUtils.waitFor(this + " to start", () -> mServingThread == null || isServing(),
+      CommonUtils.waitFor(this + " to start", () -> (mServingThread == null || isServing()),
           WaitForOptions.defaults().setTimeoutMs(timeoutMs));
       return true;
     } catch (InterruptedException e) {

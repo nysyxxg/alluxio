@@ -14,18 +14,21 @@ package alluxio.master.file;
 import alluxio.AlluxioURI;
 import alluxio.Constants;
 import alluxio.exception.FileDoesNotExistException;
+import alluxio.grpc.DeletePOptions;
+import alluxio.grpc.FreePOptions;
 import alluxio.heartbeat.HeartbeatExecutor;
 import alluxio.master.ProtobufUtils;
 import alluxio.master.file.meta.InodeTree;
-import alluxio.master.file.meta.InodeView;
+import alluxio.master.file.meta.InodeTree.LockPattern;
 import alluxio.master.file.meta.LockedInodePath;
+import alluxio.master.file.meta.Inode;
 import alluxio.master.file.meta.TtlBucket;
 import alluxio.master.file.meta.TtlBucketList;
-import alluxio.master.file.options.DeleteOptions;
-import alluxio.master.file.options.FreeOptions;
+import alluxio.master.file.contexts.DeleteContext;
+import alluxio.master.file.contexts.FreeContext;
 import alluxio.master.journal.JournalContext;
 import alluxio.proto.journal.File.UpdateInodeEntry;
-import alluxio.wire.TtlAction;
+import alluxio.grpc.TtlAction;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,13 +58,17 @@ final class InodeTtlChecker implements HeartbeatExecutor {
   }
 
   @Override
-  public void heartbeat() {
+  public void heartbeat() throws InterruptedException {
     Set<TtlBucket> expiredBuckets = mTtlBuckets.getExpiredBuckets(System.currentTimeMillis());
     for (TtlBucket bucket : expiredBuckets) {
-      for (InodeView inode : bucket.getInodes()) {
+      for (Inode inode : bucket.getInodes()) {
+        // Throw if interrupted.
+        if (Thread.interrupted()) {
+          throw new InterruptedException("InodeTtlChecker interrupted.");
+        }
         AlluxioURI path = null;
-        try (LockedInodePath inodePath = mInodeTree
-            .lockFullInodePath(inode.getId(), InodeTree.LockMode.READ)) {
+        try (LockedInodePath inodePath =
+            mInodeTree.lockFullInodePath(inode.getId(), LockPattern.READ)) {
           path = inodePath.getUri();
         } catch (FileDoesNotExistException e) {
           // The inode has already been deleted, nothing needs to be done.
@@ -79,10 +86,11 @@ final class InodeTtlChecker implements HeartbeatExecutor {
                 // public free method will lock the path, and check WRITE permission required at
                 // parent of file
                 if (inode.isDirectory()) {
-                  mFileSystemMaster
-                      .free(path, FreeOptions.defaults().setForced(true).setRecursive(true));
+                  mFileSystemMaster.free(path, FreeContext
+                      .mergeFrom(FreePOptions.newBuilder().setForced(true).setRecursive(true)));
                 } else {
-                  mFileSystemMaster.free(path, FreeOptions.defaults().setForced(true));
+                  mFileSystemMaster.free(path,
+                      FreeContext.mergeFrom(FreePOptions.newBuilder().setForced(true)));
                 }
                 try (JournalContext journalContext = mFileSystemMaster.createJournalContext()) {
                   // Reset state
@@ -98,9 +106,10 @@ final class InodeTtlChecker implements HeartbeatExecutor {
                 // public delete method will lock the path, and check WRITE permission required at
                 // parent of file
                 if (inode.isDirectory()) {
-                  mFileSystemMaster.delete(path, DeleteOptions.defaults().setRecursive(true));
+                  mFileSystemMaster.delete(path,
+                      DeleteContext.mergeFrom(DeletePOptions.newBuilder().setRecursive(true)));
                 } else {
-                  mFileSystemMaster.delete(path, DeleteOptions.defaults().setRecursive(false));
+                  mFileSystemMaster.delete(path, DeleteContext.defaults());
                 }
                 break;
               default:

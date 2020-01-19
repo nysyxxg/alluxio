@@ -12,9 +12,12 @@
 package alluxio.underfs;
 
 import alluxio.AlluxioURI;
+import alluxio.ClientContext;
+import alluxio.conf.ServerConfiguration;
 import alluxio.exception.status.NotFoundException;
 import alluxio.exception.status.UnavailableException;
-import alluxio.master.MasterClientConfig;
+import alluxio.grpc.UfsInfo;
+import alluxio.master.MasterClientContext;
 import alluxio.master.file.FileSystemMasterClient;
 import alluxio.resource.CloseableResource;
 import alluxio.util.network.NetworkAddressUtils;
@@ -41,7 +44,16 @@ public final class JobUfsManager extends AbstractUfsManager {
    * Constructs an instance of {@link JobUfsManager}.
    */
   public JobUfsManager() {
-    mMasterClient = mCloser.register(new FileSystemMasterClient(MasterClientConfig.defaults()));
+    mMasterClient =
+        mCloser.register(new FileSystemMasterClient(MasterClientContext
+            .newBuilder(ClientContext.create(ServerConfiguration.global())).build()));
+  }
+
+  @Override
+  protected void connectUfs(UnderFileSystem fs) throws IOException {
+    fs.connectFromWorker(
+        NetworkAddressUtils.getConnectHost(NetworkAddressUtils.ServiceType.JOB_WORKER_RPC,
+            ServerConfiguration.global()));
   }
 
   @Override
@@ -52,23 +64,25 @@ public final class JobUfsManager extends AbstractUfsManager {
       // Not cached locally, let's query master
     }
 
-    alluxio.thrift.UfsInfo info;
+    UfsInfo info;
     try {
       info = mMasterClient.getUfsInfo(mountId);
     } catch (IOException e) {
       throw new UnavailableException(
-          String.format("Failed to get UFS info for mount point with id %d", mountId), e);
+          String.format("Failed to create UFS info for mount point with id %d", mountId), e);
     }
-    Preconditions.checkState((info.isSetUri() && info.isSetProperties()), "unknown mountId");
+    Preconditions.checkState((info.hasUri() && info.hasProperties()), "unknown mountId");
     super.addMount(mountId, new AlluxioURI(info.getUri()),
-        UnderFileSystemConfiguration.defaults().setReadOnly(info.getProperties().isReadOnly())
-            .setShared(info.getProperties().isShared())
-            .setMountSpecificConf(info.getProperties().getProperties()));
+        UnderFileSystemConfiguration.defaults(ServerConfiguration.global())
+            .setReadOnly(info.getProperties().getReadOnly())
+            .setShared(info.getProperties().getShared())
+            .createMountSpecificConf(info.getProperties().getPropertiesMap()));
     UfsClient ufsClient = super.get(mountId);
     try (CloseableResource<UnderFileSystem> ufsResource = ufsClient.acquireUfsResource()) {
       UnderFileSystem ufs = ufsResource.get();
       ufs.connectFromWorker(
-          NetworkAddressUtils.getConnectHost(NetworkAddressUtils.ServiceType.WORKER_RPC));
+          NetworkAddressUtils.getConnectHost(NetworkAddressUtils.ServiceType.WORKER_RPC,
+              ServerConfiguration.global()));
     } catch (IOException e) {
       removeMount(mountId);
       throw new UnavailableException(

@@ -12,13 +12,13 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
-import alluxio.client.file.options.FreeOptions;
+import alluxio.client.file.FileSystemContext;
+import alluxio.conf.PropertyKey;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
+import alluxio.grpc.FreePOptions;
 import alluxio.util.CommonUtils;
 import alluxio.util.WaitForOptions;
 
@@ -37,6 +37,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * folder).
  */
 @ThreadSafe
+@PublicApi
 public final class FreeCommand extends AbstractFileSystemCommand {
 
   private static final Option FORCE_OPTION =
@@ -49,10 +50,10 @@ public final class FreeCommand extends AbstractFileSystemCommand {
   /**
    * Constructs a new instance to free the given file or folder from Alluxio.
    *
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public FreeCommand(FileSystem fs) {
-    super(fs);
+  public FreeCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -69,8 +70,10 @@ public final class FreeCommand extends AbstractFileSystemCommand {
   protected void runPlainPath(AlluxioURI path, CommandLine cl)
       throws AlluxioException, IOException {
     int interval =
-        Math.toIntExact(Configuration.getMs(PropertyKey.WORKER_BLOCK_HEARTBEAT_INTERVAL_MS));
-    FreeOptions options = FreeOptions.defaults().setRecursive(true).setForced(cl.hasOption("f"));
+        Math.toIntExact(mFsContext.getPathConf(path)
+            .getMs(PropertyKey.WORKER_BLOCK_HEARTBEAT_INTERVAL_MS));
+    FreePOptions options =
+        FreePOptions.newBuilder().setRecursive(true).setForced(cl.hasOption("f")).build();
     mFileSystem.free(path, options);
     try {
       CommonUtils.waitFor("file to be freed. Another user may be loading it.", () -> {
@@ -92,7 +95,7 @@ public final class FreeCommand extends AbstractFileSystemCommand {
     } catch (TimeoutException e) {
       throw new RuntimeException(e);
     }
-    System.out.println(path + " was successfully freed from memory.");
+    System.out.println(path + " was successfully freed from Alluxio space.");
   }
 
   @Override

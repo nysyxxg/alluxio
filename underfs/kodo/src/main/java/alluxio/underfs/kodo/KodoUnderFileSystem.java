@@ -13,7 +13,8 @@ package alluxio.underfs.kodo;
 
 import alluxio.AlluxioURI;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
+import alluxio.retry.RetryPolicy;
 import alluxio.underfs.ObjectUnderFileSystem;
 import alluxio.underfs.UnderFileSystem;
 import alluxio.underfs.UnderFileSystemConfiguration;
@@ -119,7 +120,7 @@ public class KodoUnderFileSystem extends ObjectUnderFileSystem {
   }
 
   @Override
-  protected boolean createEmptyObject(String key) {
+  public boolean createEmptyObject(String key) {
     try {
       mKodoClinet.createEmptyObject(key);
       return true;
@@ -131,7 +132,7 @@ public class KodoUnderFileSystem extends ObjectUnderFileSystem {
 
   @Override
   protected OutputStream createObject(String key) throws IOException {
-    return new KodoOutputStream(key, mKodoClinet);
+    return new KodoOutputStream(key, mKodoClinet, mUfsConf.getList(PropertyKey.TMP_DIRS, ","));
   }
 
   @Override
@@ -157,9 +158,10 @@ public class KodoUnderFileSystem extends ObjectUnderFileSystem {
     String delimiter = recursive ? "" : PATH_SEPARATOR;
     key = PathUtils.normalizePath(key, PATH_SEPARATOR);
     key = key.equals(PATH_SEPARATOR) ? "" : key;
-    FileListing result = getObjectListingChunk(key, getListingChunkLength(), delimiter);
+    FileListing result = getObjectListingChunk(key, getListingChunkLength(mUfsConf), delimiter);
     if (result != null) {
-      return new KodoObjectListingChunk(result, getListingChunkLength(), delimiter, key);
+      return new KodoObjectListingChunk(result, getListingChunkLength(mUfsConf), delimiter,
+          key);
     }
     return null;
   }
@@ -168,7 +170,7 @@ public class KodoUnderFileSystem extends ObjectUnderFileSystem {
     try {
       return mKodoClinet.listFiles(prefix, null, limit, delimiter);
     } catch (QiniuException e) {
-      LOG.error("list objects failed ,Msg:{}", e);
+      LOG.error("list objects failed:", e);
       return null;
     }
   }
@@ -202,9 +204,10 @@ public class KodoUnderFileSystem extends ObjectUnderFileSystem {
   }
 
   @Override
-  protected InputStream openObject(String key, OpenOptions options) {
+  protected InputStream openObject(String key, OpenOptions options, RetryPolicy retryPolicy) {
     try {
-      return new KodoInputStream(key, mKodoClinet, options.getOffset());
+      return new KodoInputStream(key, mKodoClinet, options.getOffset(), retryPolicy,
+          mUfsConf.getBytes(PropertyKey.UNDERFS_OBJECT_STORE_MULTI_RANGE_CHUNK_SIZE));
     } catch (QiniuException e) {
       LOG.error("Failed to open Object {}, Msg: {}", key, e);
     }

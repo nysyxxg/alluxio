@@ -11,7 +11,9 @@
 
 package alluxio.wire;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
+import io.swagger.annotations.ApiModelProperty;
 
 import java.util.List;
 import java.util.Map;
@@ -34,6 +36,7 @@ public final class AlluxioJobMasterInfo {
   /**
    * @return the configuration
    */
+  @ApiModelProperty(value = "Configuration of the Job Master")
   public Map<String, String> getConfiguration() {
     return mConfiguration;
   }
@@ -41,6 +44,7 @@ public final class AlluxioJobMasterInfo {
   /**
    * @return the start time (in milliseconds)
    */
+  @ApiModelProperty(value = "Job Master's start time in epoch time")
   public long getStartTimeMs() {
     return mStartTimeMs;
   }
@@ -48,6 +52,7 @@ public final class AlluxioJobMasterInfo {
   /**
    * @return the uptime (in milliseconds)
    */
+  @ApiModelProperty(value = "Number of milliseconds the Job Master has been running")
   public long getUptimeMs() {
     return mUptimeMs;
   }
@@ -55,6 +60,7 @@ public final class AlluxioJobMasterInfo {
   /**
    * @return the version
    */
+  @ApiModelProperty(value = "Version of the Job Master")
   public String getVersion() {
     return mVersion;
   }
@@ -62,6 +68,7 @@ public final class AlluxioJobMasterInfo {
   /**
    * @return the list of workers
    */
+  @ApiModelProperty(value = "List of Job Workers that have registered with the Job Master")
   public List<WorkerInfo> getWorkers() {
     return mWorkers;
   }
@@ -134,7 +141,7 @@ public final class AlluxioJobMasterInfo {
 
   @Override
   public String toString() {
-    return Objects.toStringHelper(this)
+    return MoreObjects.toStringHelper(this)
         .add("configuration", mConfiguration)
         .add("start time", mStartTimeMs)
         .add("uptime", mUptimeMs)

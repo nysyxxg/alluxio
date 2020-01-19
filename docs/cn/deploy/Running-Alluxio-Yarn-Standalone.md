@@ -2,8 +2,8 @@
 layout: global
 title: 在YARN Standalone模式上运行Alluxio
 nickname: 在YARN Standalone模式上运行Alluxio
-group: Deploying Alluxio
-priority: 6
+group: Install Alluxio
+priority: 5
 ---
 
 Alluxio应与YARN一起运行，以便所有YARN节点都可以访问本地的Alluxio worker。
@@ -35,7 +35,7 @@ yarn.nodemanager.resource.cpu-vcores = Total cores - Other services vcores - All
 
 更新YARN配置后，重启YARN以保证更改生效：
 
-```bash
+```console
 $ ${HADOOP_HOME}/sbin/stop-yarn.sh
 $ ${HADOOP_HOME}/sbin/start-yarn.sh
 ```

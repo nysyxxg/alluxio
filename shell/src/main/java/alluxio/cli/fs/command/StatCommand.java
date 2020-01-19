@@ -12,9 +12,10 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
 import alluxio.client.block.AlluxioBlockStore;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.URIStatus;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
@@ -39,12 +40,13 @@ import javax.annotation.concurrent.ThreadSafe;
  * If path is a file, it displays the file's all blocks info.
  */
 @ThreadSafe
+@PublicApi
 public final class StatCommand extends AbstractFileSystemCommand {
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public StatCommand(FileSystem fs) {
-    super(fs);
+  public StatCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -76,7 +78,7 @@ public final class StatCommand extends AbstractFileSystemCommand {
       } else {
         System.out.println(path + " is a file path.");
         System.out.println(status);
-        AlluxioBlockStore blockStore = AlluxioBlockStore.create();
+        AlluxioBlockStore blockStore = AlluxioBlockStore.create(mFsContext);
         List<Long> blockIds = status.getBlockIds();
         if (blockIds.isEmpty()) {
           System.out.println("This file does not contain any blocks.");

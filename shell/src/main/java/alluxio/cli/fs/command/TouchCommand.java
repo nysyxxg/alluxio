@@ -12,9 +12,9 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
-import alluxio.client.file.options.CreateFileOptions;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
 
@@ -28,13 +28,14 @@ import javax.annotation.concurrent.ThreadSafe;
  * Creates a 0 byte file specified by argv. The file will be written to UnderFileSystem.
  */
 @ThreadSafe
+@PublicApi
 public final class TouchCommand extends AbstractFileSystemCommand {
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public TouchCommand(FileSystem fs) {
-    super(fs);
+  public TouchCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -50,7 +51,7 @@ public final class TouchCommand extends AbstractFileSystemCommand {
   @Override
   protected void runPlainPath(AlluxioURI inputPath, CommandLine cl)
       throws AlluxioException, IOException {
-    mFileSystem.createFile(inputPath, CreateFileOptions.defaults()).close();
+    mFileSystem.createFile(inputPath).close();
     System.out.println(inputPath + " has been created");
   }
 

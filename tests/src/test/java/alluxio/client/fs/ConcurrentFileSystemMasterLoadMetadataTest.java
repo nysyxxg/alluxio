@@ -14,9 +14,9 @@ package alluxio.client.fs;
 import static org.junit.Assert.assertEquals;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
+import alluxio.conf.ServerConfiguration;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
 import alluxio.client.file.FileSystem;
 import alluxio.testutils.LocalAlluxioClusterResource;
 
@@ -33,26 +33,36 @@ import java.util.List;
  * Tests loading UFS metadata many times concurrently.
  */
 public final class ConcurrentFileSystemMasterLoadMetadataTest {
+  private static final int CONCURRENCY_FACTOR = 20;
   private FileSystem mFileSystem;
 
   @Rule
   public LocalAlluxioClusterResource mLocalAlluxioClusterResource =
-      new LocalAlluxioClusterResource.Builder().build();
+      new LocalAlluxioClusterResource.Builder()
+          .setProperty(PropertyKey.USER_FILE_MASTER_CLIENT_POOL_SIZE_MAX, CONCURRENCY_FACTOR)
+          .setProperty(PropertyKey.USER_BLOCK_MASTER_CLIENT_POOL_SIZE_MAX, CONCURRENCY_FACTOR)
+          /**
+           * This is to make sure master executor has enough thread to being with. Otherwise, delay
+           * on master ForkJoinPool's internal thread count adjustment might take several seconds.
+           * This can interfere with this test's timing expectations.
+           */
+          .setProperty(PropertyKey.MASTER_RPC_EXECUTOR_CORE_POOL_SIZE, CONCURRENCY_FACTOR)
+          .build();
 
   @Before
   public void before() {
-    mFileSystem = FileSystem.Factory.get();
+    mFileSystem = FileSystem.Factory.create(ServerConfiguration.global());
   }
 
   @Test
   public void loadMetadataManyDirectories() throws Exception {
-    String ufsPath = Configuration.get(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS);
+    String ufsPath = ServerConfiguration.get(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS);
     for (int i = 0; i < 5000; i++) {
       Files.createDirectory(Paths.get(ufsPath, "a" + i));
     }
 
-    // Run 20 concurrent listStatus calls on the root.
-    List<AlluxioURI> paths = Collections.nCopies(20, new AlluxioURI("/"));
+    // Run concurrent listStatus calls on the root.
+    List<AlluxioURI> paths = Collections.nCopies(CONCURRENCY_FACTOR, new AlluxioURI("/"));
 
     List<Throwable> errors = ConcurrentFileSystemMasterUtils
         .unaryOperation(mFileSystem, ConcurrentFileSystemMasterUtils.UnaryOperation.LIST_STATUS,
@@ -62,13 +72,13 @@ public final class ConcurrentFileSystemMasterLoadMetadataTest {
 
   @Test
   public void loadMetadataManyFiles() throws Exception {
-    String ufsPath = Configuration.get(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS);
+    String ufsPath = ServerConfiguration.get(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS);
     for (int i = 0; i < 5000; i++) {
       Files.createFile(Paths.get(ufsPath, "a" + i));
     }
 
-    // Run 20 concurrent listStatus calls on the root.
-    List<AlluxioURI> paths = Collections.nCopies(20, new AlluxioURI("/"));
+    // Run concurrent listStatus calls on the root.
+    List<AlluxioURI> paths = Collections.nCopies(CONCURRENCY_FACTOR, new AlluxioURI("/"));
 
     List<Throwable> errors = ConcurrentFileSystemMasterUtils
         .unaryOperation(mFileSystem, ConcurrentFileSystemMasterUtils.UnaryOperation.LIST_STATUS,

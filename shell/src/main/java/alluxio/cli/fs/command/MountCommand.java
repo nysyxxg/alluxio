@@ -12,11 +12,12 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.fsadmin.report.UfsCommand;
-import alluxio.client.file.FileSystem;
-import alluxio.client.file.options.MountOptions;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
+import alluxio.grpc.MountPOptions;
 import alluxio.wire.MountPointInfo;
 
 import com.google.common.collect.Maps;
@@ -34,6 +35,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * Mounts a UFS path onto an Alluxio path.
  */
 @ThreadSafe
+@PublicApi
 public final class MountCommand extends AbstractFileSystemCommand {
 
   private static final Option READONLY_OPTION =
@@ -62,10 +64,10 @@ public final class MountCommand extends AbstractFileSystemCommand {
           .build();
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public MountCommand(FileSystem fs) {
-    super(fs);
+  public MountCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -89,19 +91,19 @@ public final class MountCommand extends AbstractFileSystemCommand {
     }
     AlluxioURI alluxioPath = new AlluxioURI(args[0]);
     AlluxioURI ufsPath = new AlluxioURI(args[1]);
-    MountOptions options = MountOptions.defaults();
+    MountPOptions.Builder optionsBuilder = MountPOptions.newBuilder();
 
     if (cl.hasOption(READONLY_OPTION.getLongOpt())) {
-      options.setReadOnly(true);
+      optionsBuilder.setReadOnly(true);
     }
     if (cl.hasOption(SHARED_OPTION.getLongOpt())) {
-      options.setShared(true);
+      optionsBuilder.setShared(true);
     }
     if (cl.hasOption(OPTION_OPTION.getLongOpt())) {
       Properties properties = cl.getOptionProperties(OPTION_OPTION.getLongOpt());
-      options.setProperties(Maps.fromProperties(properties));
+      optionsBuilder.putAllProperties(Maps.fromProperties(properties));
     }
-    mFileSystem.mount(alluxioPath, ufsPath, options);
+    mFileSystem.mount(alluxioPath, ufsPath, optionsBuilder.build());
     System.out.println("Mounted " + ufsPath + " at " + alluxioPath);
     return 0;
   }

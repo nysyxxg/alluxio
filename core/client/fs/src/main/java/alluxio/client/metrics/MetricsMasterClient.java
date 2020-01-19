@@ -11,77 +11,26 @@
 
 package alluxio.client.metrics;
 
-import alluxio.AbstractMasterClient;
-import alluxio.Constants;
-import alluxio.client.file.FileSystemContext;
-import alluxio.exception.status.AlluxioStatusException;
-import alluxio.exception.status.UnavailableException;
-import alluxio.master.MasterClientConfig;
-import alluxio.retry.RetryUtils;
-import alluxio.thrift.AlluxioService.Client;
-import alluxio.thrift.AlluxioTException;
-import alluxio.thrift.Metric;
-import alluxio.thrift.MetricsHeartbeatTOptions;
-import alluxio.thrift.MetricsMasterClientService;
-import alluxio.util.network.NetworkAddressUtils;
+import alluxio.grpc.ClientMetrics;
 
-import org.apache.thrift.TException;
-
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 
-import javax.annotation.concurrent.ThreadSafe;
-
 /**
- * A client to use for interacting with a metrics master.
+ * Interface for a metrics master client.
  */
-@ThreadSafe
-public class MetricsMasterClient extends AbstractMasterClient {
-  private MetricsMasterClientService.Client mClient = null;
+public interface MetricsMasterClient extends Closeable {
 
   /**
-   * Creates a new metrics master client.
-   *
-   * @param conf master client configuration
+   * Clear the master metrics.
    */
-  public MetricsMasterClient(MasterClientConfig conf) {
-    super(conf, null, RetryUtils::defaultMetricsClientRetry);
-  }
-
-  @Override
-  protected Client getClient() {
-    return mClient;
-  }
-
-  @Override
-  protected String getServiceName() {
-    return Constants.METRICS_MASTER_CLIENT_SERVICE_NAME;
-  }
-
-  @Override
-  protected long getServiceVersion() {
-    return Constants.METRICS_MASTER_CLIENT_SERVICE_VERSION;
-  }
-
-  @Override
-  protected void afterConnect() {
-    mClient = new MetricsMasterClientService.Client(mProtocol);
-  }
+  void clearMetrics() throws IOException;
 
   /**
    * The method the worker should periodically execute to heartbeat back to the master.
    *
    * @param metrics a list of client metrics
    */
-  public synchronized void heartbeat(final List<Metric> metrics) throws IOException {
-    connect();
-    try {
-      mClient.metricsHeartbeat(FileSystemContext.get().getId(),
-          NetworkAddressUtils.getClientHostName(), new MetricsHeartbeatTOptions(metrics));
-    } catch (AlluxioTException e) {
-      throw AlluxioStatusException.fromThrift(e);
-    } catch (TException e) {
-      throw new UnavailableException(e);
-    }
-  }
+  void heartbeat(final List<ClientMetrics> metrics) throws IOException;
 }

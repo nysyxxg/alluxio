@@ -11,20 +11,20 @@
 
 package alluxio.cli.job.command;
 
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
 import alluxio.cli.fs.command.AbstractFileSystemCommand;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.client.job.JobContext;
 import alluxio.client.job.JobMasterClient;
-import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
+import alluxio.job.wire.JobInfo;
 import alluxio.resource.CloseableResource;
 
 import org.apache.commons.cli.CommandLine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.util.List;
 
 import javax.annotation.concurrent.ThreadSafe;
@@ -33,16 +33,17 @@ import javax.annotation.concurrent.ThreadSafe;
  * Lists the job ids in the history.
  */
 @ThreadSafe
+@PublicApi
 public final class ListCommand extends AbstractFileSystemCommand {
   private static final Logger LOG = LoggerFactory.getLogger(ListCommand.class);
 
   /**
    * Creates the job list command.
    *
-   * @param fs the Alluxio filesystem client
+   * @param fsContext the Alluxio filesystem client
    */
-  public ListCommand(FileSystem fs) {
-    super(fs);
+  public ListCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -56,12 +57,14 @@ public final class ListCommand extends AbstractFileSystemCommand {
   }
 
   @Override
-  public int run(CommandLine cl) throws AlluxioException, IOException {
-    try (CloseableResource<JobMasterClient> client =
-        JobContext.INSTANCE.acquireMasterClientResource()) {
-      List<Long> ids = client.get().list();
-      for (long id : ids) {
-        System.out.println(id);
+  public int run(CommandLine cl) {
+    try (CloseableResource<JobMasterClient> client = JobContext
+        .create(mFsContext.getClusterConf(), mFsContext.getClientContext().getUserState())
+        .acquireMasterClientResource()) {
+      List<JobInfo> jobInfos = client.get().listDetailed();
+      for (JobInfo jobInfo : jobInfos) {
+        System.out.println(String.format("%-15s %-10s %-10s", jobInfo.getId(), jobInfo.getName(),
+            jobInfo.getStatus()));
       }
     } catch (Exception e) {
       LOG.error("Failed to list the jobs ", e);

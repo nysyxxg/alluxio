@@ -11,9 +11,9 @@
 
 package alluxio.worker.block;
 
-import alluxio.Configuration;
+import alluxio.conf.ServerConfiguration;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
 import alluxio.underfs.SeekableUnderFileInputStream;
 import alluxio.underfs.UnderFileSystem;
 import alluxio.underfs.options.OpenOptions;
@@ -59,7 +59,7 @@ public class UfsInputStreamManager {
   private static final Logger LOG = LoggerFactory.getLogger(UfsInputStreamManager.class);
   private static final long UNAVAILABLE_RESOURCE_ID = -1;
   private static final boolean CACHE_ENABLED =
-      Configuration.getBoolean(PropertyKey.WORKER_UFS_INSTREAM_CACHE_ENABLED);
+      ServerConfiguration.getBoolean(PropertyKey.WORKER_UFS_INSTREAM_CACHE_ENABLED);
 
   /**
    * A map from the ufs file id to the metadata of the input streams. Synchronization on this map
@@ -111,16 +111,16 @@ public class UfsInputStreamManager {
             try {
               inputStream.close();
             } catch (IOException e) {
-              LOG.warn("Failed to close the input stream resource of file {} with file id {}",
-                  " and resource id {}", inputStream.getFilePath(), inputStream.getFileId(),
+              LOG.warn("Failed to close the input stream resource of file {} with file id {}"
+                  + " and resource id {}", inputStream.getFilePath(), inputStream.getFileId(),
                   removal.getKey());
             }
           }
         };
     mUnderFileInputStreamCache = CacheBuilder.newBuilder()
-        .maximumSize(Configuration.getInt(PropertyKey.WORKER_UFS_INSTREAM_CACHE_MAX_SIZE))
+        .maximumSize(ServerConfiguration.getInt(PropertyKey.WORKER_UFS_INSTREAM_CACHE_MAX_SIZE))
         .expireAfterAccess(
-            Configuration.getMs(PropertyKey.WORKER_UFS_INSTREAM_CACHE_EXPIRARTION_TIME),
+            ServerConfiguration.getMs(PropertyKey.WORKER_UFS_INSTREAM_CACHE_EXPIRARTION_TIME),
             TimeUnit.MILLISECONDS)
         .removalListener(RemovalListeners.asynchronous(listener, mRemovalThreadPool)).build();
   }
@@ -202,7 +202,7 @@ public class UfsInputStreamManager {
       boolean reuse) throws IOException {
     if (!ufs.isSeekable() || !CACHE_ENABLED) {
       // not able to cache, always return a new input stream
-      return ufs.open(path, openOptions);
+      return ufs.openExistingFile(path, openOptions);
     }
 
     // explicit cache cleanup
@@ -240,16 +240,18 @@ public class UfsInputStreamManager {
         final long newId = nextId;
         try {
           inputStream = mUnderFileInputStreamCache.get(nextId, () -> {
-            SeekableUnderFileInputStream ufsStream = (SeekableUnderFileInputStream) ufs.open(path,
+            SeekableUnderFileInputStream ufsStream
+                = (SeekableUnderFileInputStream) ufs.openExistingFile(path,
                 OpenOptions.defaults().setOffset(openOptions.getOffset()));
             LOG.debug("Created the under file input stream resource of {}", newId);
             return new CachedSeekableInputStream(ufsStream, newId, fileId, path);
           });
         } catch (ExecutionException e) {
           LOG.warn("Failed to create a new cached ufs instream of file id {} and path {}", fileId,
-              path);
+              path, e);
           // fall back to a ufs creation.
-          return ufs.open(path, OpenOptions.defaults().setOffset(openOptions.getOffset()));
+          return ufs.openExistingFile(path,
+              OpenOptions.defaults().setOffset(openOptions.getOffset()));
         }
       }
 

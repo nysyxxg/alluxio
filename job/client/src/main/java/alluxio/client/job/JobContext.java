@@ -11,11 +11,13 @@
 
 package alluxio.client.job;
 
+import alluxio.ClientContext;
+import alluxio.conf.AlluxioConfiguration;
 import alluxio.exception.status.UnavailableException;
 import alluxio.master.MasterInquireClient;
 import alluxio.resource.CloseableResource;
-
-import com.google.common.annotations.VisibleForTesting;
+import alluxio.security.user.UserState;
+import alluxio.worker.job.JobMasterClientContext;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -37,8 +39,6 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class JobContext implements Closeable  {
-  public static final JobContext INSTANCE = create();
-
   /** The shared master inquire client associated with the {@link JobContext}. */
   @GuardedBy("this")
   private MasterInquireClient mJobMasterInquireClient;
@@ -47,12 +47,13 @@ public final class JobContext implements Closeable  {
   /**
    * Creates a job context.
    *
+   * @param alluxioConf Alluxio configuration
+   * @param userState user state
    * @return the context
    */
-  @VisibleForTesting
-  static JobContext create() {
+  public static JobContext create(AlluxioConfiguration alluxioConf, UserState userState) {
     JobContext context = new JobContext();
-    context.init();
+    context.init(alluxioConf, userState);
     return context;
   }
 
@@ -64,9 +65,12 @@ public final class JobContext implements Closeable  {
   /**
    * Initializes the context. Only called in the factory methods and reset.
    */
-  private synchronized void init() {
-    mJobMasterInquireClient = MasterInquireClient.Factory.createForJobMaster();
-    mJobMasterClientPool = new JobMasterClientPool();
+  private synchronized void init(AlluxioConfiguration alluxioConf, UserState userState) {
+    mJobMasterInquireClient = MasterInquireClient.Factory
+        .createForJobMaster(alluxioConf, userState);
+    mJobMasterClientPool =
+        new JobMasterClientPool(JobMasterClientContext
+            .newBuilder(ClientContext.create(userState.getSubject(), alluxioConf)).build());
   }
 
   /**

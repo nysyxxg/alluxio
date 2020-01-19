@@ -11,6 +11,7 @@
 
 package alluxio.util;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Optional;
 
@@ -27,7 +28,7 @@ public final class UnixMountInfo {
     mDeviceSpec = Optional.fromNullable(deviceSpec);
     mMountPoint = Optional.fromNullable(mountPoint);
     mFsType = Optional.fromNullable(fsType);
-    mMountOptions = options;
+    mMountOptions = options == null ? new Options.Builder().build() : options;
   }
 
   /**
@@ -80,7 +81,7 @@ public final class UnixMountInfo {
 
   @Override
   public String toString() {
-    return Objects.toStringHelper(this)
+    return MoreObjects.toStringHelper(this)
         .add("deviceSpec", mDeviceSpec)
         .add("mountPoint", mMountPoint)
         .add("fsType", mFsType)
@@ -176,7 +177,7 @@ public final class UnixMountInfo {
 
     @Override
     public String toString() {
-      return Objects.toStringHelper(this)
+      return MoreObjects.toStringHelper(this)
           .add("size", mSize)
           .toString();
     }

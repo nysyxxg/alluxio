@@ -12,13 +12,15 @@
 package alluxio.server.health;
 
 import alluxio.HealthCheckClient;
-import alluxio.PropertyKey;
-import alluxio.jobmaster.JobMasterHealthCheckClient;
-import alluxio.master.LocalAlluxioCluster;
+import alluxio.conf.ServerConfiguration;
+import alluxio.master.MasterHealthCheckClient;
+import alluxio.master.job.JobMasterRpcHealthCheckClient;
+import alluxio.master.LocalAlluxioJobCluster;
 import alluxio.retry.CountingRetry;
 import alluxio.testutils.BaseIntegrationTest;
 import alluxio.testutils.LocalAlluxioClusterResource;
 
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
@@ -30,19 +32,23 @@ public class JobMasterHealthCheckClientIntegrationTest extends BaseIntegrationTe
 
   @Rule
   public LocalAlluxioClusterResource mLocalAlluxioClusterResource =
-      new LocalAlluxioClusterResource.Builder().setProperty(PropertyKey.JOB_MASTER_RPC_PORT, 0)
-          .build();
+      new LocalAlluxioClusterResource.Builder().build();
 
-  private LocalAlluxioCluster mLocalAlluxioCluster = null;
+  private LocalAlluxioJobCluster mLocalAlluxioJobCluster = null;
   private HealthCheckClient mHealthCheckClient;
 
   @Before
   public final void before() throws Exception {
-    mLocalAlluxioCluster = mLocalAlluxioClusterResource.get();
-    InetSocketAddress address =
-        new InetSocketAddress(mLocalAlluxioCluster.getWorkerAddress().getHost(),
-            mLocalAlluxioCluster.getWorkerAddress().getRpcPort());
-    mHealthCheckClient = new JobMasterHealthCheckClient(address, () -> new CountingRetry(1));
+    mLocalAlluxioJobCluster = new LocalAlluxioJobCluster();
+    mLocalAlluxioJobCluster.start();
+    InetSocketAddress address = mLocalAlluxioJobCluster.getMaster().getRpcAddress();
+    mHealthCheckClient = new JobMasterRpcHealthCheckClient(address, () -> new CountingRetry(1),
+        ServerConfiguration.global());
+  }
+
+  @After
+  public final void after() throws Exception {
+    mLocalAlluxioJobCluster.stop();
   }
 
   @Test
@@ -51,8 +57,29 @@ public class JobMasterHealthCheckClientIntegrationTest extends BaseIntegrationTe
   }
 
   @Test
-  public void isServingStopFS() throws Exception {
-    mLocalAlluxioCluster.stopFS();
+  public void isServingStopJobs() throws Exception {
+    mLocalAlluxioJobCluster.stop();
+    Assert.assertFalse(mHealthCheckClient.isServing());
+  }
+
+  @Test
+  public void isServingMasterHealthCheck() {
+    mHealthCheckClient = new MasterHealthCheckClient.Builder(ServerConfiguration.global())
+        .withRetryPolicy(() -> new CountingRetry(1))
+        .withProcessCheck(false)
+        .withAlluxioMasterType(MasterHealthCheckClient.MasterType.JOB_MASTER)
+        .build();
+    Assert.assertTrue(mHealthCheckClient.isServing());
+  }
+
+  @Test
+  public void isServingStopJobsMasterHealthCheck() throws Exception {
+    mLocalAlluxioJobCluster.stop();
+    mHealthCheckClient = new MasterHealthCheckClient.Builder(ServerConfiguration.global())
+        .withRetryPolicy(() -> new CountingRetry(1))
+        .withProcessCheck(false)
+        .withAlluxioMasterType(MasterHealthCheckClient.MasterType.JOB_MASTER)
+        .build();
     Assert.assertFalse(mHealthCheckClient.isServing());
   }
 }

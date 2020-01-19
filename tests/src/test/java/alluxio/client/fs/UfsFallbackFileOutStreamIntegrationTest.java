@@ -13,11 +13,15 @@ package alluxio.client.fs;
 
 import alluxio.AlluxioURI;
 import alluxio.ConfigurationRule;
-import alluxio.PropertyKey;
-import alluxio.client.WriteType;
+import alluxio.client.file.FileSystem;
+import alluxio.conf.PropertyKey;
 import alluxio.client.file.FileOutStream;
 import alluxio.client.file.URIStatus;
-import alluxio.client.file.options.CreateFileOptions;
+import alluxio.conf.ServerConfiguration;
+import alluxio.grpc.CreateFilePOptions;
+import alluxio.grpc.WritePType;
+import alluxio.heartbeat.HeartbeatContext;
+import alluxio.heartbeat.ManuallyScheduleHeartbeat;
 import alluxio.master.file.meta.PersistenceState;
 import alluxio.testutils.IntegrationTestUtils;
 import alluxio.testutils.LocalAlluxioClusterResource;
@@ -25,6 +29,7 @@ import alluxio.util.CommonUtils;
 import alluxio.util.io.PathUtils;
 
 import org.junit.Assert;
+import org.junit.ClassRule;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -38,21 +43,22 @@ import java.util.HashMap;
 /**
  * Integration tests for {@link FileOutStream} of under storage type being async
  * persist.
- *
  */
 @RunWith(Parameterized.class)
 public class UfsFallbackFileOutStreamIntegrationTest extends AbstractFileOutStreamIntegrationTest {
+  @ClassRule
+  public static ManuallyScheduleHeartbeat sManuallyScheduleEviction =
+      new ManuallyScheduleHeartbeat(HeartbeatContext.WORKER_SPACE_RESERVER);
+
   protected static final int WORKER_MEMORY_SIZE = 1500;
   protected static final int BUFFER_BYTES = 100;
 
   @Override
-  protected LocalAlluxioClusterResource buildLocalAlluxioClusterResource() {
-    return new LocalAlluxioClusterResource.Builder()
+  protected void customizeClusterResource(LocalAlluxioClusterResource.Builder resource) {
+    resource.setProperty(PropertyKey.WORKER_MEMORY_SIZE, WORKER_MEMORY_SIZE)
         .setProperty(PropertyKey.WORKER_FILE_BUFFER_SIZE, BUFFER_BYTES) // initial buffer for worker
-        .setProperty(PropertyKey.WORKER_MEMORY_SIZE, WORKER_MEMORY_SIZE)
         .setProperty(PropertyKey.USER_FILE_UFS_TIER_ENABLED, true)
-        .setProperty(PropertyKey.WORKER_TIERED_STORE_RESERVER_ENABLED, false)
-        .build();
+        .setProperty(PropertyKey.WORKER_NETWORK_NETTY_WATERMARK_HIGH, "1.0");
   }
 
   // varying the client side configuration
@@ -82,15 +88,18 @@ public class UfsFallbackFileOutStreamIntegrationTest extends AbstractFileOutStre
 
   @Test
   public void shortCircuitWrite() throws Exception {
+
     try (Closeable c = new ConfigurationRule(new HashMap<PropertyKey, String>() {
       {
         put(PropertyKey.USER_FILE_BUFFER_BYTES, String.valueOf(mUserFileBufferSize));
         put(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT, String.valueOf(mBlockSize));
       }
-    }).toResource()) {
+    }, ServerConfiguration.global()).toResource()) {
+      FileSystem fs = FileSystem.Factory.create(ServerConfiguration.global());
       AlluxioURI filePath = new AlluxioURI(PathUtils.uniqPath());
-      CreateFileOptions op = CreateFileOptions.defaults().setWriteType(WriteType.ASYNC_THROUGH);
-      writeIncreasingBytesToFile(filePath, mFileLength, op);
+      CreateFilePOptions op = CreateFilePOptions.newBuilder()
+          .setWriteType(WritePType.ASYNC_THROUGH).setRecursive(true).build();
+      writeIncreasingBytesToFile(fs, filePath, mFileLength, op);
 
       CommonUtils.sleepMs(1);
       // check the file is completed but not persisted
@@ -111,16 +120,17 @@ public class UfsFallbackFileOutStreamIntegrationTest extends AbstractFileOutStre
 
   @Ignore("Files may be lost due to evicting and committing before file is complete.")
   @Test
-  public void nettyWrite() throws Exception {
+  public void grpcWrite() throws Exception {
     try (Closeable c = new ConfigurationRule(new HashMap<PropertyKey, String>() {
       {
         put(PropertyKey.USER_FILE_BUFFER_BYTES, String.valueOf(mUserFileBufferSize));
         put(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT, String.valueOf(mBlockSize));
         put(PropertyKey.USER_SHORT_CIRCUIT_ENABLED, "false");
       }
-    }).toResource()) {
+    }, ServerConfiguration.global()).toResource()) {
       AlluxioURI filePath = new AlluxioURI(PathUtils.uniqPath());
-      CreateFileOptions op = CreateFileOptions.defaults().setWriteType(WriteType.ASYNC_THROUGH);
+      CreateFilePOptions op = CreateFilePOptions.newBuilder()
+          .setWriteType(WritePType.ASYNC_THROUGH).setRecursive(true).build();
       writeIncreasingBytesToFile(filePath, mFileLength, op);
 
       CommonUtils.sleepMs(1);

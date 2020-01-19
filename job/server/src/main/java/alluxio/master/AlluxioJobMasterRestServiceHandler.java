@@ -11,14 +11,16 @@
 
 package alluxio.master;
 
-import alluxio.Configuration;
-import alluxio.ConfigurationValueOptions;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.ConfigurationValueOptions;
 import alluxio.RestUtils;
 import alluxio.RuntimeConstants;
 import alluxio.web.JobMasterWebServer;
 import alluxio.wire.AlluxioJobMasterInfo;
 
-import com.qmino.miredot.annotations.ReturnType;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
+import io.swagger.annotations.ApiParam;
 
 import java.util.Map;
 
@@ -36,6 +38,7 @@ import javax.ws.rs.core.Response;
  * This class is a REST handler for requesting general job master information.
  */
 @NotThreadSafe
+@Api(value = "/job_master", description = "Job Master Rest Service")
 @Path(AlluxioJobMasterRestServiceHandler.SERVICE_PREFIX)
 @Produces(MediaType.APPLICATION_JSON)
 public final class AlluxioJobMasterRestServiceHandler {
@@ -47,27 +50,30 @@ public final class AlluxioJobMasterRestServiceHandler {
   // queries
   public static final String QUERY_RAW_CONFIGURATION = "raw_configuration";
 
-  private final JobMasterProcess mJobMaster;
+  private final AlluxioJobMasterProcess mJobMaster;
 
   /**
    * @param context context for the servlet
    */
   public AlluxioJobMasterRestServiceHandler(@Context ServletContext context) {
-    mJobMaster = (JobMasterProcess) context
+    mJobMaster = (AlluxioJobMasterProcess) context
         .getAttribute(JobMasterWebServer.ALLUXIO_JOB_MASTER_SERVLET_RESOURCE_KEY);
   }
 
   /**
    * @summary get the Alluxio job master information
    * @param rawConfiguration if it's true, raw configuration values are returned,
-   *    otherwise, they are looked up; if it's not provided in URL queries, then
-   *    it is null, which means false.
+   *        otherwise, they are looked up; if it's not provided in URL queries, then
+   *        it is null, which means false.
    * @return the response object
    */
   @GET
   @Path(GET_INFO)
-  @ReturnType("alluxio.wire.AlluxioJobMasterInfo")
-  public Response getInfo(@QueryParam(QUERY_RAW_CONFIGURATION) final Boolean rawConfiguration) {
+  @ApiOperation(value = "Get general job master service information",
+      response = alluxio.wire.AlluxioJobMasterInfo.class)
+  public Response getInfo(
+      @ApiParam("Returns raw configuration values if true, false be default.")
+      @QueryParam(QUERY_RAW_CONFIGURATION) final Boolean rawConfiguration) {
     // TODO(jiri): Add a mechanism for retrieving only a subset of the fields.
     return RestUtils.call(() -> {
       boolean rawConfig = false;
@@ -82,14 +88,14 @@ public final class AlluxioJobMasterRestServiceHandler {
               .setVersion(RuntimeConstants.VERSION)
               .setWorkers(mJobMaster.getJobMaster().getWorkerInfoList());
       return result;
-    });
+    }, ServerConfiguration.global());
   }
 
   private Map<String, String> getConfigurationInternal(boolean raw) {
     if (raw) {
-      return Configuration.toMap(ConfigurationValueOptions.defaults().useRawValue(raw));
+      return ServerConfiguration.toMap(ConfigurationValueOptions.defaults().useRawValue(raw));
     } else {
-      return Configuration.toMap();
+      return ServerConfiguration.toMap();
     }
   }
 }

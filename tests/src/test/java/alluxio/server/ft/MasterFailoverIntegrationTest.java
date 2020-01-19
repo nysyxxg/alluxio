@@ -11,16 +11,18 @@
 
 package alluxio.server.ft;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
 import alluxio.Constants;
-import alluxio.PropertyKey;
 import alluxio.UnderFileSystemFactoryRegistryRule;
 import alluxio.client.file.FileSystem;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
 import alluxio.master.MultiMasterLocalAlluxioCluster;
 import alluxio.testutils.BaseIntegrationTest;
+import alluxio.testutils.IntegrationTestUtils;
 import alluxio.testutils.underfs.delegating.DelegatingUnderFileSystem;
 import alluxio.testutils.underfs.delegating.DelegatingUnderFileSystemFactory;
 import alluxio.underfs.UnderFileSystem;
@@ -31,7 +33,9 @@ import com.google.common.io.Files;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.ClassRule;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,7 +52,8 @@ public final class MasterFailoverIntegrationTest extends BaseIntegrationTest {
 
   // An under file system which has slow directory deletion.
   private static final UnderFileSystem UFS =
-      new DelegatingUnderFileSystem(UnderFileSystem.Factory.create(LOCAL_UFS_PATH)) {
+      new DelegatingUnderFileSystem(UnderFileSystem.Factory.create(LOCAL_UFS_PATH,
+          ServerConfiguration.global())) {
         @Override
         public boolean deleteDirectory(String path) throws IOException {
           CommonUtils.sleepMs(DELETE_DELAY);
@@ -62,6 +67,9 @@ public final class MasterFailoverIntegrationTest extends BaseIntegrationTest {
         }
       };
 
+  @Rule
+  public TestName mTestName = new TestName();
+
   @ClassRule
   public static UnderFileSystemFactoryRegistryRule sUnderfilesystemfactoryregistry =
       new UnderFileSystemFactoryRegistryRule(new DelegatingUnderFileSystemFactory(UFS));
@@ -70,10 +78,13 @@ public final class MasterFailoverIntegrationTest extends BaseIntegrationTest {
   public final void before() throws Exception {
     mMultiMasterLocalAlluxioCluster =
         new MultiMasterLocalAlluxioCluster(2);
-    mMultiMasterLocalAlluxioCluster.initConfiguration();
-    Configuration.set(PropertyKey.USER_RPC_RETRY_MAX_DURATION, "15sec");
-    Configuration.set(PropertyKey.MASTER_THRIFT_SHUTDOWN_TIMEOUT, "30sec");
-    Configuration.set(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS,
+    mMultiMasterLocalAlluxioCluster.initConfiguration(
+        IntegrationTestUtils.getTestName(getClass().getSimpleName(), mTestName.getMethodName()));
+    ServerConfiguration.set(PropertyKey.USER_RPC_RETRY_MAX_DURATION, "60sec");
+    ServerConfiguration.set(PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS, "1sec");
+    ServerConfiguration.set(PropertyKey.NETWORK_CONNECTION_SERVER_SHUTDOWN_TIMEOUT, "30sec");
+    ServerConfiguration.set(PropertyKey.MASTER_JOURNAL_TAILER_SHUTDOWN_QUIET_WAIT_TIME_MS, "0sec");
+    ServerConfiguration.set(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS,
         DelegatingUnderFileSystemFactory.DELEGATING_SCHEME + "://" + LOCAL_UFS_PATH);
     mMultiMasterLocalAlluxioCluster.start();
     mFileSystem = mMultiMasterLocalAlluxioCluster.getClient();
@@ -96,14 +107,15 @@ public final class MasterFailoverIntegrationTest extends BaseIntegrationTest {
     Thread.sleep(500);
     mMultiMasterLocalAlluxioCluster.stopZk();
     // Give master a chance to notice that ZK is dead and trigger failover.
-    Thread.sleep(1000);
+    Thread.sleep(5000);
     mMultiMasterLocalAlluxioCluster.restartZk();
     deleteThread.join();
     // After failing on the original master, the delete should be retried on the new master.
     assertFalse(mFileSystem.exists(dir));
     // Restart to make sure the journal is consistent (we didn't write two delete entries for /dir).
     mMultiMasterLocalAlluxioCluster.restartMasters();
-    mFileSystem.listStatus(new AlluxioURI("/"));
+    mFileSystem = mMultiMasterLocalAlluxioCluster.getClient(); // need new client after restart
+    assertEquals(0, mFileSystem.listStatus(new AlluxioURI("/")).size());
   }
 
   private class DeleteThread extends Thread {

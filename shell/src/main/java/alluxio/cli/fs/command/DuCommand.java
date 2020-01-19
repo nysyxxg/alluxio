@@ -12,12 +12,13 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.URIStatus;
-import alluxio.client.file.options.ListStatusOptions;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
+import alluxio.grpc.ListStatusPOptions;
 import alluxio.util.FormatUtils;
 
 import org.apache.commons.cli.CommandLine;
@@ -25,6 +26,8 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 
 import java.io.IOException;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 import javax.annotation.concurrent.ThreadSafe;
@@ -33,6 +36,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * Displays the size of a file or a directory specified by argv.
  */
 @ThreadSafe
+@PublicApi
 public final class DuCommand extends AbstractFileSystemCommand {
   private static final String LONG_INFO_FORMAT = "%-13s %-16s %-16s %s";
   private static final String SHORT_INFO_FORMAT = "%-13s %-16s %s";
@@ -65,10 +69,10 @@ public final class DuCommand extends AbstractFileSystemCommand {
           .build();
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public DuCommand(FileSystem fs) {
-    super(fs);
+  public DuCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -86,12 +90,13 @@ public final class DuCommand extends AbstractFileSystemCommand {
   protected void runPlainPath(AlluxioURI path, CommandLine cl)
       throws AlluxioException, IOException {
 
-    ListStatusOptions listOptions = ListStatusOptions.defaults().setRecursive(true);
+    ListStatusPOptions listOptions = ListStatusPOptions.newBuilder().setRecursive(true).build();
     List<URIStatus> statuses = mFileSystem.listStatus(path, listOptions);
     if (statuses == null || statuses.size() == 0) {
       return;
     }
 
+    Collections.sort(statuses, Comparator.comparing(URIStatus::getPath));
     getSizeInfo(path, statuses, cl.hasOption(READABLE_OPTION_NAME),
         cl.hasOption(SUMMARIZE_OPTION_NAME), cl.hasOption(MEMORY_OPTION_NAME));
   }

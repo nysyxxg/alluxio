@@ -14,7 +14,12 @@ package alluxio.cli;
 import alluxio.AlluxioURI;
 import alluxio.client.file.FileOutStream;
 import alluxio.client.file.FileSystem;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.InstancedConfiguration;
 import alluxio.exception.AlluxioException;
+import alluxio.grpc.CreateFilePOptions;
+import alluxio.util.ConfigurationUtils;
+import alluxio.util.io.PathUtils;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
@@ -35,12 +40,13 @@ public class RunOperation {
   enum Operation {
     CreateFile,
     CreateEmptyFile,
-    CreateAndDeleteEmptyFile;
+    CreateAndDeleteEmptyFile,
+    ListStatus,
   }
 
   @Parameter(names = {"-op", "-operation"},
       description = "the operation to perform. Options are [CreateEmptyFile, "
-          + "CreateAndDeleteEmptyFile, CreateFile]",
+          + "CreateAndDeleteEmptyFile, CreateFile, ListStatus]",
       required = true)
   private Operation mOperation;
   @Parameter(names = {"-n", "-num"},
@@ -67,14 +73,17 @@ public class RunOperation {
    * @param args command-line arguments
    */
   public static void main(String[] args) {
-    System.exit(new RunOperation().run(args));
+    System.exit(new RunOperation(new InstancedConfiguration(ConfigurationUtils.defaults()))
+        .run(args));
   }
 
   /**
    * Constructs a new {@link RunOperation} object.
+   *
+   * @param alluxioConf Alluxio configuration
    */
-  public RunOperation() {
-    mFileSystem = FileSystem.Factory.get();
+  public RunOperation(AlluxioConfiguration alluxioConf) {
+    mFileSystem = FileSystem.Factory.create(alluxioConf);
   }
 
   /**
@@ -130,7 +139,7 @@ public class RunOperation {
     }
 
     private void applyOperation() throws IOException, AlluxioException {
-      AlluxioURI uri = new AlluxioURI(String.format("%s/%s", mDir, UUID.randomUUID()));
+      AlluxioURI uri = new AlluxioURI(PathUtils.concatPath(mDir, UUID.randomUUID()));
       switch (mOperation) {
         case CreateEmptyFile:
           mFileSystem.createFile(uri).close();
@@ -140,9 +149,14 @@ public class RunOperation {
           mFileSystem.delete(uri);
           break;
         case CreateFile:
-          try (FileOutStream file = mFileSystem.createFile(uri)) {
+          try (FileOutStream file =
+              mFileSystem.createFile(uri,
+                  CreateFilePOptions.newBuilder().setRecursive(true).build())) {
             file.write(mFiledata);
           }
+          break;
+        case ListStatus:
+          mFileSystem.listStatus(new AlluxioURI(mDir));
           break;
         default:
           throw new IllegalStateException("Unknown operation: " + mOperation);

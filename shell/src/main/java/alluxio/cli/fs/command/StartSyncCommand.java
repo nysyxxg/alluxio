@@ -12,8 +12,9 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
 
@@ -29,13 +30,14 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 
 @ThreadSafe
+@PublicApi
 public final class StartSyncCommand extends AbstractFileSystemCommand {
 
   /**
-   * @param fs the filesystem of Alluxio
+   * @param fsContext the filesystem of Alluxio
    */
-  public StartSyncCommand(FileSystem fs) {
-    super(fs);
+  public StartSyncCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -45,7 +47,8 @@ public final class StartSyncCommand extends AbstractFileSystemCommand {
 
   @Override
   protected void runPlainPath(AlluxioURI path, CommandLine cl) {
-    System.out.println("Starting a full sync of '" + path + "'. This may take a while ...");
+    System.out.println("Starting a full sync of '" + path
+        + "'. You can check the status of the sync using getSyncPathList cmd");
     try {
       mFileSystem.startSync(path);
     } catch (Exception e) {

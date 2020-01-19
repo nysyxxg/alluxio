@@ -2,23 +2,23 @@
 layout: global
 title: Alluxio与YARN整合运行
 nickname: Alluxio与YARN整合
-group: Deploying Alluxio
-priority: 4
+group: Install Alluxio
+priority: 5
 ---
 
 * 内容列表
 {:toc}
 
-注意：YARN 不是非常适合像 Alluxio 这样长时间运行的应用，我们推荐根据[该指南](Running-Alluxio-Yarn-Standalone.html)来将 Alluxio 与 YARN 一起运行，而不是作为 YARN 内的一个应用来运行。
+注意：YARN 不是非常适合像 Alluxio 这样长时间运行的应用，我们推荐根据[在YARN Standalone模式上运行Alluxio]({{ '/cn/deploy/Running-Alluxio-Yarn-Standalone.html' | relativize_url }})来将 Alluxio 与 YARN 一起运行，而不是作为 YARN 内的一个应用来运行。
 
 ## 前期准备
 
 **一个运行的YARN的集群**
 
-**下载到本地的 [Alluxio](https://alluxio.org/download)**
+**下载到本地的 [Alluxio](https://alluxio.io/download)**
 
 ## 配置
-通过一些特定的属性来定制Alluxio master和worker(比如，在各个worker节点上设置分层存储)，查阅[Configuration settings](Configuration-Settings.html)
+通过一些特定的属性来定制Alluxio master和worker(比如，在各个worker节点上设置分层存储)，查阅[配置文档]({{ '/cn/operation/Configuration.html' | relativize_url }})
 为了确保你的配置能够被ApplicationMaster和Alluxio master/workers都读到，将`alluxio-site.properties` 放到`/etc/alluxio/alluxio-site.properties`中。
 
 ## 运行Alluxio应用
@@ -31,8 +31,8 @@ priority: 4
 
 例如，启动一个有3个worker节点的Alluxio集群，其中一个HDFS的临时目录为`hdfs://${HDFS_MASTER}:9000/tmp/`，并且master节点的主机名为`${ALLUXIO_MASTER}`，你可以这样运行：
 
-```bash
-$ # If Yarn does not reside in `HADOOP_HOME`, set the environment variable `YARN_HOME` to the base path of Yarn.
+```console
+# If Yarn does not reside in `HADOOP_HOME`, set the environment variable `YARN_HOME` to the base path of Yarn.
 $ export HADOOP_HOME=<path to hadoop home>
 $ ${HADOOP_HOME}/bin/hadoop fs -mkdir hdfs://${HDFS_MASTER}:9000/tmp
 $ ${ALLUXIO_HOME}/integration/yarn/bin/alluxio-yarn.sh 3 hdfs://${HDFS_MASTER}:9000/tmp/ ${ALLUXIO_MASTER}
@@ -51,7 +51,7 @@ INFO impl.YarnClientImpl: Submitted application application_1445469376652_0002
 
 这个application ID可以通过运行如下指令来销毁application：
 
-```bash
+```console
 $ ${HADOOP_HOME}/bin/yarn application -kill application_1445469376652_0002
 ```
 
@@ -61,6 +61,6 @@ $ ${HADOOP_HOME}/bin/yarn application -kill application_1445469376652_0002
 
 如果你有Alluxio application在运行，你可以通过在`conf/alluxio-site.properties`上配置`alluxio.master.hostname=masterhost`并运行如下指令来查看其健康性
 
-```bash
+```console
 $ ${ALLUXIO_HOME}/bin/alluxio runTests
 ```

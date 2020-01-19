@@ -11,26 +11,24 @@
 
 package alluxio.worker.block;
 
-import alluxio.Configuration;
+import alluxio.conf.ServerConfiguration;
 import alluxio.ProcessUtils;
-import alluxio.PropertyKey;
+import alluxio.conf.PropertyKey;
 import alluxio.StorageTierAssoc;
 import alluxio.WorkerStorageTierAssoc;
 import alluxio.exception.ConnectionFailedException;
+import alluxio.grpc.Command;
+import alluxio.grpc.ConfigProperty;
+import alluxio.grpc.Scope;
 import alluxio.heartbeat.HeartbeatExecutor;
-import alluxio.metrics.Metric;
 import alluxio.metrics.MetricsSystem;
-import alluxio.thrift.Command;
 import alluxio.util.ConfigurationUtils;
-import alluxio.wire.ConfigProperty;
-import alluxio.wire.Scope;
 import alluxio.wire.WorkerNetAddress;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -88,7 +86,8 @@ public final class BlockMasterSync implements HeartbeatExecutor {
     mWorkerId = workerId;
     mWorkerAddress = workerAddress;
     mMasterClient = masterClient;
-    mHeartbeatTimeoutMs = (int) Configuration.getMs(PropertyKey.WORKER_BLOCK_HEARTBEAT_TIMEOUT_MS);
+    mHeartbeatTimeoutMs = (int) ServerConfiguration
+        .getMs(PropertyKey.WORKER_BLOCK_HEARTBEAT_TIMEOUT_MS);
     mAsyncBlockRemover = new AsyncBlockRemover(mBlockWorker);
 
     registerWithMaster();
@@ -102,10 +101,12 @@ public final class BlockMasterSync implements HeartbeatExecutor {
   private void registerWithMaster() throws IOException {
     BlockStoreMeta storeMeta = mBlockWorker.getStoreMetaFull();
     StorageTierAssoc storageTierAssoc = new WorkerStorageTierAssoc();
-    List<ConfigProperty> configList = ConfigurationUtils.getConfiguration(Scope.WORKER);
+    List<ConfigProperty> configList =
+        ConfigurationUtils.getConfiguration(ServerConfiguration.global(), Scope.WORKER);
     mMasterClient.register(mWorkerId.get(),
         storageTierAssoc.getOrderedStorageAliases(), storeMeta.getCapacityBytesOnTiers(),
-        storeMeta.getUsedBytesOnTiers(), storeMeta.getBlockList(), configList);
+        storeMeta.getUsedBytesOnTiers(), storeMeta.getBlockListByStorageLocation(),
+        storeMeta.getLostStorage(), configList);
   }
 
   /**
@@ -119,13 +120,12 @@ public final class BlockMasterSync implements HeartbeatExecutor {
 
     // Send the heartbeat and execute the response
     Command cmdFromMaster = null;
-    List<alluxio.thrift.Metric> metrics = new ArrayList<>();
-    for (Metric metric : MetricsSystem.allWorkerMetrics()) {
-      metrics.add(metric.toThrift());
-    }
+    List<alluxio.grpc.Metric> metrics = MetricsSystem.reportWorkerMetrics();
+
     try {
-      cmdFromMaster = mMasterClient.heartbeat(mWorkerId.get(), storeMeta.getUsedBytesOnTiers(),
-          blockReport.getRemovedBlocks(), blockReport.getAddedBlocks(), metrics);
+      cmdFromMaster = mMasterClient.heartbeat(mWorkerId.get(), storeMeta.getCapacityBytesOnTiers(),
+          storeMeta.getUsedBytesOnTiers(), blockReport.getRemovedBlocks(),
+          blockReport.getAddedBlocks(), blockReport.getLostStorage(), metrics);
       handleMasterCommand(cmdFromMaster);
       mLastSuccessfulHeartbeatMs = System.currentTimeMillis();
     } catch (IOException | ConnectionFailedException e) {
@@ -139,7 +139,7 @@ public final class BlockMasterSync implements HeartbeatExecutor {
       mMasterClient.disconnect();
       if (mHeartbeatTimeoutMs > 0) {
         if (System.currentTimeMillis() - mLastSuccessfulHeartbeatMs >= mHeartbeatTimeoutMs) {
-          if (Configuration.getBoolean(PropertyKey.TEST_MODE)) {
+          if (ServerConfiguration.getBoolean(PropertyKey.TEST_MODE)) {
             throw new RuntimeException("Master heartbeat timeout exceeded: " + mHeartbeatTimeoutMs);
           }
           // TODO(andrew): Propagate the exception to the main thread and exit there.
@@ -174,7 +174,7 @@ public final class BlockMasterSync implements HeartbeatExecutor {
         break;
       // Master requests blocks to be removed from Alluxio managed space.
       case Free:
-        mAsyncBlockRemover.addBlocksToDelete(cmd.getData());
+        mAsyncBlockRemover.addBlocksToDelete(cmd.getDataList());
         break;
       // No action required
       case Nothing:

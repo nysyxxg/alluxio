@@ -19,7 +19,13 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
-import com.aliyun.oss.OSSClient;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.retry.CountingRetry;
+import alluxio.util.ConfigurationUtils;
+
+import com.aliyun.oss.OSS;
 import com.aliyun.oss.model.GetObjectRequest;
 import com.aliyun.oss.model.OSSObject;
 
@@ -41,9 +47,11 @@ public class OSSInputStreamTest {
 
   private static final String BUCKET_NAME = "testBucket";
   private static final String OBJECT_KEY = "testObjectKey";
+  private static AlluxioConfiguration sConf =
+      new InstancedConfiguration(ConfigurationUtils.defaults());
 
   private OSSInputStream mOssInputStream;
-  private OSSClient mOssClient;
+  private OSS mOssClient;
   private InputStream[] mInputStreamSpy;
   private OSSObject[] mOssObject;
 
@@ -55,7 +63,7 @@ public class OSSInputStreamTest {
 
   @Before
   public void setUp() throws IOException {
-    mOssClient = mock(OSSClient.class);
+    mOssClient = mock(OSS.class);
 
     byte[] input = new byte[] {1, 2, 3};
     mOssObject = new OSSObject[input.length];
@@ -76,7 +84,8 @@ public class OSSInputStreamTest {
       mInputStreamSpy[i] = spy(new ByteArrayInputStream(mockInput));
       when(mOssObject[i].getObjectContent()).thenReturn(mInputStreamSpy[i]);
     }
-    mOssInputStream = new OSSInputStream(BUCKET_NAME, OBJECT_KEY, mOssClient);
+    mOssInputStream = new OSSInputStream(BUCKET_NAME, OBJECT_KEY, mOssClient, new CountingRetry(1),
+        sConf.getBytes(PropertyKey.UNDERFS_OBJECT_STORE_MULTI_RANGE_CHUNK_SIZE));
   }
 
   @Test

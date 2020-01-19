@@ -12,11 +12,12 @@
 package alluxio.cli.fs.command;
 
 import alluxio.AlluxioURI;
+import alluxio.annotation.PublicApi;
 import alluxio.cli.CommandUtils;
-import alluxio.client.file.FileSystem;
-import alluxio.client.file.options.SetAttributeOptions;
+import alluxio.client.file.FileSystemContext;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.status.InvalidArgumentException;
+import alluxio.grpc.SetAttributePOptions;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Option;
@@ -32,6 +33,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * Changes the owner of a file or directory specified by args.
  */
 @ThreadSafe
+@PublicApi
 public final class ChownCommand extends AbstractFileSystemCommand {
 
   private static final Option RECURSIVE_OPTION =
@@ -47,10 +49,10 @@ public final class ChownCommand extends AbstractFileSystemCommand {
   /**
    * Creates a new instance of {@link ChownCommand}.
    *
-   * @param fs an Alluxio file system handle
+   * @param fsContext an Alluxio file system handle
    */
-  public ChownCommand(FileSystem fs) {
-    super(fs);
+  public ChownCommand(FileSystemContext fsContext) {
+    super(fsContext);
   }
 
   @Override
@@ -95,8 +97,8 @@ public final class ChownCommand extends AbstractFileSystemCommand {
    */
   private void chown(AlluxioURI path, String owner, boolean recursive)
       throws AlluxioException, IOException {
-    SetAttributeOptions options =
-        SetAttributeOptions.defaults().setOwner(owner).setRecursive(recursive);
+    SetAttributePOptions options =
+        SetAttributePOptions.newBuilder().setOwner(owner).setRecursive(recursive).build();
     mFileSystem.setAttribute(path, options);
     System.out.println("Changed owner of " + path + " to " + owner);
   }
@@ -111,8 +113,8 @@ public final class ChownCommand extends AbstractFileSystemCommand {
    */
   private void chown(AlluxioURI path, String owner, String group, boolean recursive)
       throws AlluxioException, IOException {
-    SetAttributeOptions options =
-        SetAttributeOptions.defaults().setOwner(owner).setGroup(group).setRecursive(recursive);
+    SetAttributePOptions options = SetAttributePOptions.newBuilder().setOwner(owner).setGroup(group)
+        .setRecursive(recursive).build();
     mFileSystem.setAttribute(path, options);
     System.out.println("Changed owner:group of " + path + " to " + owner + ":" + group + ".");
   }

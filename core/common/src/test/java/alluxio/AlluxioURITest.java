@@ -18,12 +18,14 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 
 import alluxio.uri.Authority;
+import alluxio.uri.MultiMasterAuthority;
 import alluxio.uri.NoAuthority;
 import alluxio.uri.SingleMasterAuthority;
 import alluxio.uri.UnknownAuthority;
 import alluxio.uri.ZookeeperAuthority;
 import alluxio.util.OSUtils;
 
+import com.google.common.testing.EqualsTester;
 import org.junit.Test;
 
 import java.util.HashMap;
@@ -119,6 +121,52 @@ public class AlluxioURITest {
     assertEquals("scheme:part2://localhost:8000/xy z/a b c/d", uri.join(new AlluxioURI("/d"))
         .toString());
     assertEquals("scheme:part2://localhost:8000/xy z/a b c", uri.toString());
+  }
+
+  @Test
+  public void basicMultiMasterUri() {
+    AlluxioURI uri = new AlluxioURI("alluxio://host1:19998,host2:19998,host3:19998/xy z/a b c");
+
+    assertTrue(uri.hasAuthority());
+    assertEquals("host1:19998,host2:19998,host3:19998", uri.getAuthority().toString());
+    assertTrue(uri.getAuthority() instanceof MultiMasterAuthority);
+
+    assertEquals(2, uri.getDepth());
+    assertEquals("a b c", uri.getName());
+    assertEquals("alluxio://host1:19998,host2:19998,host3:19998/xy z", uri.getParent().toString());
+    assertEquals("alluxio://host1:19998,host2:19998,host3:19998/",
+        uri.getParent().getParent().toString());
+    assertEquals("/xy z/a b c", uri.getPath());
+    assertEquals("alluxio", uri.getScheme());
+    assertTrue(uri.hasScheme());
+    assertTrue(uri.isAbsolute());
+    assertTrue(uri.isPathAbsolute());
+    assertEquals("alluxio://host1:19998,host2:19998,host3:19998/xy z/a b c/d",
+        uri.join("/d").toString());
+    assertEquals("alluxio://host1:19998,host2:19998,host3:19998/xy z/a b c/d",
+        uri.join(new AlluxioURI("/d")).toString());
+    assertEquals("alluxio://host1:19998,host2:19998,host3:19998/xy z/a b c", uri.toString());
+  }
+
+  @Test
+  public void semicolonMultiMasterUri() {
+    AlluxioURI uri =
+        new AlluxioURI("alluxio://host1:1323;host2:54325;host3:64354/xy z/a b c");
+    assertTrue(uri.hasAuthority());
+    assertEquals("host1:1323,host2:54325,host3:64354", uri.getAuthority().toString());
+    assertTrue(uri.getAuthority() instanceof MultiMasterAuthority);
+    MultiMasterAuthority authority = (MultiMasterAuthority) uri.getAuthority();
+    assertEquals("host1:1323,host2:54325,host3:64354", authority.getMasterAddresses());
+  }
+
+  @Test
+  public void plusMultiMasterUri() {
+    AlluxioURI uri =
+        new AlluxioURI("alluxio://host1:526+host2:54325+host3:624/xy z/a b c");
+    assertTrue(uri.hasAuthority());
+    assertTrue(uri.getAuthority() instanceof MultiMasterAuthority);
+    MultiMasterAuthority authority = (MultiMasterAuthority) uri.getAuthority();
+    assertEquals("host1:526,host2:54325,host3:624", authority.getMasterAddresses());
   }
 
   @Test
@@ -436,6 +484,12 @@ public class AlluxioURITest {
         .equals(new AlluxioURI("scheme:part1:part2://127.0.0.1:3306/a.txt")));
     assertFalse(new AlluxioURI("scheme:part1:part2://127.0.0.1:3306/a.txt")
         .equals(new AlluxioURI("part2://127.0.0.1:3306/a.txt")));
+
+    new EqualsTester()
+        .addEqualityGroup(new AlluxioURI("sch:p1:p2://aaaabbbb:12345/"),
+            new AlluxioURI("sch:p1:p2://aaaabbbb:12345/"))
+        .addEqualityGroup(new AlluxioURI("standard://host:12345/"))
+        .testEquals();
   }
 
   /**
@@ -584,7 +638,6 @@ public class AlluxioURITest {
     assertEquals(null, new AlluxioURI("/").getScheme());
     assertEquals("file", new AlluxioURI("file:/").getScheme());
     assertEquals("file", new AlluxioURI("file://localhost/").getScheme());
-    assertEquals("alluxio-ft", new AlluxioURI("alluxio-ft://localhost/").getScheme());
     assertEquals("s3", new AlluxioURI("s3://localhost/").getScheme());
     assertEquals("alluxio", new AlluxioURI("alluxio://localhost/").getScheme());
     assertEquals("hdfs", new AlluxioURI("hdfs://localhost/").getScheme());
@@ -694,6 +747,10 @@ public class AlluxioURITest {
     final String pathWithSpecialCharAndColon = "����,��b����$o����[| =B��:��";
     assertEquals(new AlluxioURI("/" + pathWithSpecialCharAndColon),
         new AlluxioURI("/").join(pathWithSpecialCharAndColon));
+
+    // join empty string
+    assertEquals(new AlluxioURI("/a"), new AlluxioURI("/a").join(""));
+    assertEquals(new AlluxioURI("/a"), new AlluxioURI("/a").join(new AlluxioURI("")));
   }
 
   @Test
@@ -720,6 +777,9 @@ public class AlluxioURITest {
     assertNotEquals(new AlluxioURI("a/b.txt"), new AlluxioURI("a").joinUnsafe("/c/../b.txt"));
     assertNotEquals(new AlluxioURI("alluxio:/a/b.txt"),
         new AlluxioURI("alluxio:/a/c.txt").joinUnsafe("/../b.txt"));
+
+    // join empty string
+    assertEquals(new AlluxioURI("/a"), new AlluxioURI("/a").joinUnsafe(""));
   }
 
   /**

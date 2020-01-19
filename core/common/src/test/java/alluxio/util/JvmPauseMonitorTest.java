@@ -11,8 +11,12 @@
 
 package alluxio.util;
 
+import static org.junit.Assert.assertNotEquals;
+
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
+
 import com.google.common.collect.Lists;
-import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
 
@@ -22,7 +26,13 @@ public final class JvmPauseMonitorTest {
   @Test
   @Ignore("https://alluxio.atlassian.net/browse/ALLUXIO-3059")
   public void monitorTest() {
-    JvmPauseMonitor jvmPauseMonitor = new JvmPauseMonitor();
+    InstancedConfiguration conf = new InstancedConfiguration(ConfigurationUtils.defaults());
+    long gcSleepInterval = conf.getMs(PropertyKey.JVM_MONITOR_SLEEP_INTERVAL_MS);
+    long warnThreshold = conf.getMs(PropertyKey.JVM_MONITOR_WARN_THRESHOLD_MS);
+    long infoThreshold = conf.getMs(PropertyKey.JVM_MONITOR_INFO_THRESHOLD_MS);
+
+    JvmPauseMonitor jvmPauseMonitor = new JvmPauseMonitor(gcSleepInterval, warnThreshold,
+        infoThreshold);
     jvmPauseMonitor.start();
     List<String> list = Lists.newArrayList();
     int i = 0;
@@ -33,7 +43,7 @@ public final class JvmPauseMonitorTest {
         break;
       }
     }
-    Assert.assertNotEquals(jvmPauseMonitor.getWarnTimeExceeded(), 0);
-    Assert.assertNotEquals(jvmPauseMonitor.getTotalExtraTime(), 0);
+    assertNotEquals(jvmPauseMonitor.getWarnTimeExceeded(), 0);
+    assertNotEquals(jvmPauseMonitor.getTotalExtraTime(), 0);
   }
 }
